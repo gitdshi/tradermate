@@ -1,0 +1,28 @@
+# To ensure app dependencies are ported from your virtual environment/host machine into your container, run 'pip freeze > requirements.txt' in the terminal to overwrite this file
+# dependencies
+ta-lib==0.6.8
+rqdatac==3.4.1
+# vnpy
+vnpy==4.3.0
+# vnpy-ctp==6.7.11.2
+vnpy_ctastrategy==1.4.0
+vnpy-ctabacktester==1.3.0
+vnpy_sqlite==1.1.3
+vnpy_datamanager==1.2.0
+vnpy_tushare==1.4.21.0
+vnpy_mysql==1.1.1
+# Database
+mysql-connector-python==8.0.33
+# Backtrader
+backtrader==1.9.78.123
+# Numpy and Pandas
+numpy
+pandas>=2.2.3
+sqlalchemy==2.0.20
+pymysql>=1.1.1
+tushare>=1.4.21
+# Matplotlib and Seaborn
+#matplotlib==3.10.8
+#seaborn==0.13.2
+# Yahoo Finance data
+#yfinance
