@@ -330,6 +330,9 @@ def run_backtest_task(
             for bar in engine.history_data:
                 stock_price_curve.append({
                     "datetime": bar.datetime.isoformat() if bar.datetime else None,
+                    "open": float(bar.open_price),
+                    "high": float(bar.high_price),
+                    "low": float(bar.low_price),
                     "close": float(bar.close_price)
                 })
         
