@@ -56,6 +56,22 @@ class BacktestServiceV2:
         if strategy_id:
             strategy_code, strategy_class_name = self._get_strategy_from_db(strategy_id, user_id)
         
+        # If symbol_name not provided, try to fetch from stock_basic table
+        if not symbol_name:
+            conn = get_db_connection()
+            try:
+                result_row = conn.execute(
+                    text("SELECT name FROM stock_basic WHERE ts_code = :s OR symbol = :s LIMIT 1"),
+                    {"s": symbol}
+                ).fetchone()
+                if result_row:
+                    # SQLAlchemy Row proxies allow attribute access
+                    symbol_name = result_row.name if hasattr(result_row, 'name') else list(result_row)[0]
+            except Exception:
+                # Ignore DB lookup errors and leave symbol_name empty
+                pass
+            finally:
+                conn.close()
         # Save job metadata
         metadata = {
             "job_id": job_id,
@@ -252,20 +268,21 @@ class BacktestServiceV2:
         """
         # Get metadata
         metadata = self.job_storage.get_job_metadata(job_id)
-        
+
         if not metadata:
             return None
-        
+
         # Check authorization
         if metadata.get("user_id") != user_id:
             return None
-        
+
         # Get result if completed
         result = None
         if metadata.get("status") in ["completed", "failed", "finished"]:
             result = self.job_storage.get_result(job_id)
-        
-        return {
+
+        # Build response merging metadata fields so frontend can access symbol_name, strategy_name, etc.
+        response: Dict[str, Any] = {
             "job_id": job_id,
             "status": metadata.get("status"),
             "type": metadata.get("type"),
@@ -275,6 +292,13 @@ class BacktestServiceV2:
             "updated_at": metadata.get("updated_at"),
             "result": result,
         }
+
+        # Merge selected metadata fields at top level for backwards compatibility
+        for key in ["symbol", "symbol_name", "strategy_id", "strategy_class", "strategy_name", "start_date", "end_date", "initial_capital", "rate", "slippage", "parameters"]:
+            if key in metadata:
+                response[key] = metadata.get(key)
+
+        return response
     
     def list_user_jobs(
         self, 

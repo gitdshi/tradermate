@@ -337,10 +337,28 @@ def run_backtest_task(
             benchmark_curve = benchmark_data["prices"]
         
         # Build result with all metrics
+        # Try to fetch human-readable symbol name from DB
+        symbol_name = ""
+        try:
+            conn = get_db_connection()
+            try:
+                row = conn.execute(
+                    text("SELECT name FROM stock_basic WHERE ts_code = :s OR symbol = :s LIMIT 1"),
+                    {"s": symbol}
+                ).fetchone()
+                if row:
+                    symbol_name = row.name if hasattr(row, 'name') else list(row)[0]
+            finally:
+                conn.close()
+        except Exception:
+            # ignore DB lookup errors
+            symbol_name = ""
+
         result = {
             "job_id": job_id,
             "status": "completed",
             "symbol": symbol,
+            "symbol_name": symbol_name,
             "start_date": start_date,
             "end_date": end_date,
             "initial_capital": initial_capital,
