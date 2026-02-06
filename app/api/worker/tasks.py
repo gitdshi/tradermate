@@ -194,6 +194,7 @@ def run_backtest_task(
     size: int,
     pricetick: float,
     parameters: Optional[Dict[str, Any]] = None,
+    benchmark: str = "399300.SZ",
     user_id: int = None,
     strategy_id: int = None
 ) -> Dict[str, Any]:
@@ -212,6 +213,7 @@ def run_backtest_task(
         size: Contract size
         pricetick: Price tick
         parameters: Strategy parameters
+        benchmark: Benchmark symbol (default: 399300.SZ for HS300)
         user_id: User ID for DB storage
         strategy_id: Strategy ID for DB storage
     
@@ -300,11 +302,11 @@ def run_backtest_task(
             if len(balance_values) > 1:
                 strategy_daily_returns = np.diff(balance_values) / balance_values[:-1]
         
-        # Calculate alpha and beta against HS300 benchmark
+        # Calculate alpha and beta against benchmark
         alpha = None
         beta = None
         benchmark_return = None
-        benchmark_data = get_benchmark_data_for_worker(start_date, end_date, "399300.SZ")
+        benchmark_data = get_benchmark_data_for_worker(start_date, end_date, benchmark)
         if benchmark_data and strategy_daily_returns is not None:
             alpha, beta = calculate_alpha_beta_for_worker(strategy_daily_returns, benchmark_data["returns"])
             benchmark_return = benchmark_data["total_return"]
@@ -362,6 +364,7 @@ def run_backtest_task(
             "start_date": start_date,
             "end_date": end_date,
             "initial_capital": initial_capital,
+            "benchmark": benchmark,
             "statistics": {
                 "total_return": float(statistics.get("total_return", 0)),
                 "annual_return": float(statistics.get("annual_return", 0)),
@@ -379,7 +382,7 @@ def run_backtest_task(
                 "alpha": alpha,
                 "beta": beta,
                 "benchmark_return": benchmark_return,
-                "benchmark_symbol": "399300.SZ"
+                "benchmark_symbol": benchmark
             },
             "equity_curve": equity_curve,
             "trades": trades,

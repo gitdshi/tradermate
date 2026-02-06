@@ -41,6 +41,7 @@ class BacktestServiceV2:
         parameters: Optional[Dict[str, Any]] = None,
         symbol_name: str = "",
         strategy_name: str = "",
+        benchmark: str = "399300.SZ",
     ) -> str:
         """
         Submit a backtest job to RQ queue.
@@ -88,6 +89,7 @@ class BacktestServiceV2:
             "initial_capital": initial_capital,
             "rate": rate,
             "slippage": slippage,
+            "benchmark": benchmark,
             "parameters": parameters or {},
             "created_at": datetime.now().isoformat(),
             "progress": 0,
@@ -109,6 +111,7 @@ class BacktestServiceV2:
             size=size,
             pricetick=pricetick,
             parameters=parameters,
+            benchmark=benchmark,
             job_id=job_id,
             user_id=user_id,
             strategy_id=strategy_id,
@@ -294,7 +297,7 @@ class BacktestServiceV2:
         }
 
         # Merge selected metadata fields at top level for backwards compatibility
-        for key in ["symbol", "symbol_name", "strategy_id", "strategy_class", "strategy_name", "start_date", "end_date", "initial_capital", "rate", "slippage", "parameters"]:
+        for key in ["symbol", "symbol_name", "strategy_id", "strategy_class", "strategy_name", "start_date", "end_date", "initial_capital", "rate", "slippage", "benchmark", "parameters"]:
             if key in metadata:
                 response[key] = metadata.get(key)
 

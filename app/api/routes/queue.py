@@ -131,6 +131,7 @@ async def submit_backtest_to_queue(
         parameters=request.get("parameters"),
         symbol_name=request.get("symbol_name", ""),
         strategy_name=request.get("strategy_name", ""),
+        benchmark=request.get("benchmark", "399300.SZ"),
     )
     
     return {"job_id": job_id, "status": "queued", "message": "Backtest job submitted to queue"}
