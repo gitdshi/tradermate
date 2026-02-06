@@ -49,9 +49,16 @@ def get_benchmark_data_for_worker(start_date: str, end_date: str, benchmark_symb
     conn = get_tushare_connection()
     
     try:
-        # Convert date format
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+        # Convert date format - handle both string and date objects
+        if isinstance(start_date, str):
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        else:
+            start_dt = datetime.combine(start_date, datetime.min.time())
+        
+        if isinstance(end_date, str):
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+        else:
+            end_dt = datetime.combine(end_date, datetime.min.time())
         
         # Note: index_daily uses 'index_code' column, not 'ts_code'
         query = """
@@ -73,13 +80,30 @@ def get_benchmark_data_for_worker(start_date: str, end_date: str, benchmark_symb
         if not rows or len(rows) < 2:
             return None
         
+        # Extract dates and closes
+        dates = [row.trade_date for row in rows]
         closes = np.array([float(row.close) for row in rows])
         daily_returns = np.diff(closes) / closes[:-1]
         total_return = (closes[-1] - closes[0]) / closes[0] * 100
         
+        # Format prices for chart
+        prices = []
+        for date_val, close_val in zip(dates, closes):
+            # Handle both string (YYYYMMDD) and datetime.date objects from DB
+            if isinstance(date_val, str):
+                dt_obj = datetime.strptime(date_val, "%Y%m%d")
+            else:
+                # Already a date/datetime object
+                dt_obj = datetime.combine(date_val, datetime.min.time()) if not isinstance(date_val, datetime) else date_val
+            prices.append({
+                "datetime": dt_obj.isoformat(),
+                "close": float(close_val)
+            })
+        
         return {
             "returns": daily_returns,
             "total_return": float(total_return),
+            "prices": prices
         }
         
     except Exception as e:
@@ -298,6 +322,20 @@ def run_backtest_task(
                     "volume": float(t.volume)
                 })
         
+        # Build stock price curve from historical data
+        stock_price_curve = []
+        if engine.history_data:
+            for bar in engine.history_data:
+                stock_price_curve.append({
+                    "datetime": bar.datetime.isoformat() if bar.datetime else None,
+                    "close": float(bar.close_price)
+                })
+        
+        # Add benchmark curve if available
+        benchmark_curve = None
+        if benchmark_data and "prices" in benchmark_data:
+            benchmark_curve = benchmark_data["prices"]
+        
         # Build result with all metrics
         result = {
             "job_id": job_id,
@@ -327,6 +365,8 @@ def run_backtest_task(
             },
             "equity_curve": equity_curve,
             "trades": trades,
+            "stock_price_curve": stock_price_curve,
+            "benchmark_curve": benchmark_curve,
             "completed_at": datetime.now().isoformat(),
         }
         

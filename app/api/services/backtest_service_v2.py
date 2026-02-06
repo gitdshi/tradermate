@@ -39,6 +39,8 @@ class BacktestServiceV2:
         size: int = 1,
         pricetick: float = 0.01,
         parameters: Optional[Dict[str, Any]] = None,
+        symbol_name: str = "",
+        strategy_name: str = "",
     ) -> str:
         """
         Submit a backtest job to RQ queue.
@@ -62,10 +64,14 @@ class BacktestServiceV2:
             "status": "queued",
             "strategy_id": strategy_id,
             "strategy_class": strategy_class_name,
+            "strategy_name": strategy_name,
             "symbol": symbol,
+            "symbol_name": symbol_name,
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
             "initial_capital": initial_capital,
+            "rate": rate,
+            "slippage": slippage,
             "parameters": parameters or {},
             "created_at": datetime.now().isoformat(),
             "progress": 0,
@@ -256,7 +262,7 @@ class BacktestServiceV2:
         
         # Get result if completed
         result = None
-        if metadata.get("status") in ["completed", "failed"]:
+        if metadata.get("status") in ["completed", "failed", "finished"]:
             result = self.job_storage.get_result(job_id)
         
         return {
