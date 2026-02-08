@@ -382,7 +382,7 @@ async def get_bulk_job_summary(
                     stats = parsed.get("statistics", {})
                     completed.append({
                         "symbol": r.vt_symbol,
-                        "symbol_name": parsed.get("symbol_name", ""),
+                        "symbol_name": parsed.get("symbol_name", "") if parsed else "",
                         "total_return": stats.get("total_return"),
                         "annual_return": stats.get("annual_return"),
                         "sharpe_ratio": stats.get("sharpe_ratio"),
@@ -394,7 +394,20 @@ async def get_bulk_job_summary(
                 except Exception:
                     failed_list.append({"symbol": r.vt_symbol, "error": "Parse error"})
             elif r.status == "failed":
-                failed_list.append({"symbol": r.vt_symbol, "error": r.error or "Unknown error"})
+                # Try to extract symbol_name from result JSON if available
+                symbol_name = None
+                if r.result:
+                    try:
+                        parsed = _json.loads(r.result) if isinstance(r.result, str) else r.result
+                        symbol_name = parsed.get("symbol_name") if isinstance(parsed, dict) else None
+                    except Exception:
+                        symbol_name = None
+
+                failed_list.append({
+                    "symbol": r.vt_symbol,
+                    "symbol_name": symbol_name or "",
+                    "error": r.error or "Unknown error",
+                })
 
         # Compute aggregates from completed results
         n = len(completed)
