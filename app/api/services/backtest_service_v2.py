@@ -7,7 +7,7 @@ from app.api.models.backtest import BacktestStatus
 from app.api.worker.config import get_queue
 from app.api.worker.tasks import (
     run_backtest_task,
-    run_batch_backtest_task,
+    run_bulk_backtest_task,
     run_optimization_task
 )
 from app.api.services.job_storage import get_job_storage
@@ -137,43 +137,91 @@ class BacktestServiceV2:
         size: int = 1,
         pricetick: float = 0.01,
         parameters: Optional[Dict[str, Any]] = None,
+        strategy_name: str = "",
+        benchmark: str = "399300.SZ",
     ) -> str:
         """
-        Submit a batch backtest job to RQ queue.
+        Submit a bulk backtest job to RQ queue.
         
         Returns:
             Job ID
         """
         # Generate job ID
-        job_id = f"batch_{uuid.uuid4().hex[:16]}"
+        job_id = f"bulk_{uuid.uuid4().hex[:16]}"
         
         # Get strategy code if custom strategy
         strategy_code = None
+        strategy_version = None
         if strategy_id:
-            strategy_code, strategy_class_name, _ = self._get_strategy_from_db(strategy_id, user_id)
+            strategy_code, strategy_class_name, strategy_version = self._get_strategy_from_db(strategy_id, user_id)
         
         # Save job metadata
         metadata = {
             "job_id": job_id,
             "user_id": user_id,
-            "type": "batch_backtest",
+            "type": "bulk_backtest",
             "status": "queued",
+            "strategy_id": strategy_id,
             "strategy_class": strategy_class_name,
+            "strategy_name": strategy_name,
+            "strategy_version": strategy_version,
             "symbols": symbols,
             "total_symbols": len(symbols),
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
             "initial_capital": initial_capital,
+            "rate": rate,
+            "slippage": slippage,
+            "benchmark": benchmark,
             "parameters": parameters or {},
             "created_at": datetime.now().isoformat(),
             "progress": 0,
         }
         self.job_storage.save_job_metadata(job_id, metadata)
         
+        # Insert into bulk_backtest DB table
+        import json as _json
+        conn = get_db_connection()
+        try:
+            conn.execute(
+                text("""
+                    INSERT INTO bulk_backtest
+                    (user_id, job_id, strategy_id, strategy_class, strategy_version,
+                     symbols, start_date, end_date, parameters, initial_capital,
+                     rate, slippage, benchmark, status, total_symbols, created_at)
+                    VALUES
+                    (:user_id, :job_id, :strategy_id, :strategy_class, :strategy_version,
+                     :symbols, :start_date, :end_date, :parameters, :initial_capital,
+                     :rate, :slippage, :benchmark, 'queued', :total_symbols, :created_at)
+                """),
+                {
+                    "user_id": user_id,
+                    "job_id": job_id,
+                    "strategy_id": strategy_id,
+                    "strategy_class": strategy_class_name,
+                    "strategy_version": strategy_version,
+                    "symbols": _json.dumps(symbols),
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat(),
+                    "parameters": _json.dumps(parameters) if parameters else "{}",
+                    "initial_capital": initial_capital,
+                    "rate": rate,
+                    "slippage": slippage,
+                    "benchmark": benchmark,
+                    "total_symbols": len(symbols),
+                    "created_at": datetime.now(),
+                }
+            )
+            conn.commit()
+        except Exception as e:
+            print(f"[Service] Error inserting bulk_backtest row: {e}")
+        finally:
+            conn.close()
+        
         # Enqueue job using RQ 2.x API
         queue = get_queue('backtest')
         queue.enqueue(
-            run_batch_backtest_task,
+            run_bulk_backtest_task,
             strategy_code=strategy_code,
             strategy_class_name=strategy_class_name,
             symbols=symbols,
@@ -185,7 +233,10 @@ class BacktestServiceV2:
             size=size,
             pricetick=pricetick,
             parameters=parameters,
+            benchmark=benchmark,
             job_id=job_id,
+            user_id=user_id,
+            strategy_id=strategy_id,
             job_timeout=7200,  # 2 hours
             result_ttl=86400 * 7,
         )
@@ -299,7 +350,7 @@ class BacktestServiceV2:
         }
 
         # Merge selected metadata fields at top level for backwards compatibility
-        for key in ["symbol", "symbol_name", "strategy_id", "strategy_class", "strategy_name", "strategy_version", "start_date", "end_date", "initial_capital", "rate", "slippage", "benchmark", "parameters"]:
+        for key in ["symbol", "symbol_name", "strategy_id", "strategy_class", "strategy_name", "strategy_version", "start_date", "end_date", "initial_capital", "rate", "slippage", "benchmark", "parameters", "symbols", "total_symbols"]:
             if key in metadata:
                 response[key] = metadata.get(key)
 

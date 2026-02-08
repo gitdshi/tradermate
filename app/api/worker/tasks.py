@@ -475,7 +475,7 @@ def run_backtest_task(
         }
 
 
-def run_batch_backtest_task(
+def run_bulk_backtest_task(
     strategy_code: Optional[str],
     strategy_class_name: str,
     symbols: list[str],
@@ -487,39 +487,42 @@ def run_batch_backtest_task(
     size: int,
     pricetick: float,
     parameters: Optional[Dict[str, Any]] = None,
-    job_id: str = None
+    benchmark: str = "399300.SZ",
+    job_id: str = None,
+    user_id: int = None,
+    strategy_id: int = None,
 ) -> Dict[str, Any]:
     """
-    Run batch backtest task in background worker.
-    
-    Args:
-        strategy_code: Custom strategy code (if not builtin)
-        strategy_class_name: Name of strategy class
-        symbols: List of trading symbols
-        start_date: Start date (YYYY-MM-DD)
-        end_date: End date (YYYY-MM-DD)
-        initial_capital: Initial capital
-        rate: Commission rate
-        slippage: Slippage
-        size: Contract size
-        pricetick: Price tick
-        parameters: Strategy parameters
-        job_id: Job ID for tracking
-    
-    Returns:
-        Dict with batch backtest results
+    Run bulk backtest task – one strategy against many symbols sequentially.
+    Each child result is saved to backtest_history with bulk_job_id.
+    Progress is reported after every symbol completes.
     """
+    job_storage = get_job_storage()
+    total = len(symbols)
+    successful = 0
+    failed_count = 0
+    best_return = None
+    best_symbol = None
+
     try:
-        print(f"[Worker] Starting batch backtest job {job_id}")
-        print(f"[Worker] Strategy: {strategy_class_name}, Symbols: {len(symbols)}")
-        
-        results = []
-        successful = 0
-        failed = 0
-        
-        for symbol in symbols:
+        print(f"[Worker] Starting bulk backtest job {job_id}")
+        print(f"[Worker] Strategy: {strategy_class_name}, Symbols: {total}")
+        job_storage.update_job_status(job_id, "started")
+
+        # Read strategy_version from parent metadata
+        _strategy_version = None
+        try:
+            _meta = job_storage.get_job_metadata(job_id)
+            if _meta:
+                sv = _meta.get("strategy_version")
+                _strategy_version = int(sv) if sv is not None else None
+        except Exception:
+            pass
+
+        for idx, symbol in enumerate(symbols):
+            child_job_id = f"{job_id}__{symbol}"
             try:
-                print(f"[Worker] Processing {symbol}...")
+                print(f"[Worker] [{idx+1}/{total}] Processing {symbol}...")
                 result = run_backtest_task(
                     strategy_code=strategy_code,
                     strategy_class_name=strategy_class_name,
@@ -532,40 +535,72 @@ def run_batch_backtest_task(
                     size=size,
                     pricetick=pricetick,
                     parameters=parameters,
-                    job_id=f"{job_id}_{symbol}"
+                    benchmark=benchmark,
+                    user_id=user_id,
+                    strategy_id=strategy_id,
                 )
-                
-                if result["status"] == "completed":
+
+                child_status = result.get("status", "failed")
+                if child_status == "completed":
                     successful += 1
+                    ret = result.get("statistics", {}).get("total_return")
+                    if ret is not None and (best_return is None or ret > best_return):
+                        best_return = ret
+                        best_symbol = symbol
                 else:
-                    failed += 1
-                
-                results.append(result)
-                
+                    failed_count += 1
+
+                # Save child to DB with bulk_job_id link
+                _save_bulk_child(child_job_id, job_id, user_id, strategy_id,
+                                 strategy_class_name, _strategy_version,
+                                 symbol, start_date, end_date, parameters,
+                                 child_status, result, result.get("error"))
+
             except Exception as e:
                 print(f"[Worker] Error processing {symbol}: {e}")
-                failed += 1
-                results.append({
-                    "symbol": symbol,
-                    "status": "failed",
-                    "error": str(e)
-                })
-        
-        return {
+                failed_count += 1
+                _save_bulk_child(child_job_id, job_id, user_id, strategy_id,
+                                 strategy_class_name, _strategy_version,
+                                 symbol, start_date, end_date, parameters,
+                                 "failed", None, str(e))
+
+            # Update progress
+            completed = idx + 1
+            pct = int(completed / total * 100)
+            job_storage.update_progress(job_id, pct, f"{completed}/{total} symbols done")
+
+            # Update bulk_backtest row
+            _update_bulk_row(job_id, completed, best_return, best_symbol)
+
+        # Final result summary stored in Redis for the parent job
+        summary = {
             "job_id": job_id,
             "status": "completed",
-            "total_symbols": len(symbols),
+            "total_symbols": total,
             "successful": successful,
-            "failed": failed,
-            "results": results,
+            "failed": failed_count,
+            "best_return": best_return,
+            "best_symbol": best_symbol,
             "completed_at": datetime.now().isoformat(),
         }
-        
+        job_storage.update_job_status(job_id, "finished")
+        job_storage.save_result(job_id, summary)
+
+        # Mark DB row completed
+        _finish_bulk_row(job_id, "completed", best_return, best_symbol, total)
+
+        print(f"[Worker] Bulk backtest {job_id} done: {successful} ok, {failed_count} failed")
+        return summary
+
     except Exception as e:
-        error_msg = f"Batch backtest failed: {str(e)}"
+        error_msg = f"Bulk backtest failed: {str(e)}"
         print(f"[Worker] ERROR: {error_msg}")
         traceback.print_exc()
-        
+        try:
+            job_storage.update_job_status(job_id, "failed", error=error_msg)
+        except Exception:
+            pass
+        _finish_bulk_row(job_id, "failed", best_return, best_symbol, successful + failed_count)
         return {
             "job_id": job_id,
             "status": "failed",
@@ -573,6 +608,97 @@ def run_batch_backtest_task(
             "traceback": traceback.format_exc(),
             "failed_at": datetime.now().isoformat(),
         }
+
+
+# ---------- helpers for bulk backtest DB persistence ----------
+
+def _save_bulk_child(child_job_id, bulk_job_id, user_id, strategy_id,
+                     strategy_class, strategy_version, symbol, start_date,
+                     end_date, parameters, status, result, error=None):
+    """Insert a child backtest row linked to a bulk job."""
+    conn = get_db_connection()
+    try:
+        now = datetime.utcnow()
+        conn.execute(
+            text("""
+                INSERT INTO backtest_history
+                (user_id, job_id, bulk_job_id, strategy_id, strategy_class,
+                 strategy_version, vt_symbol, start_date, end_date, parameters,
+                 status, result, error, created_at, completed_at)
+                VALUES
+                (:user_id, :job_id, :bulk_job_id, :strategy_id, :strategy_class,
+                 :strategy_version, :vt_symbol, :start_date, :end_date, :parameters,
+                 :status, :result, :error, :created_at, :completed_at)
+                ON DUPLICATE KEY UPDATE
+                status = :status, result = :result, error = :error, completed_at = :completed_at
+            """),
+            {
+                "user_id": user_id,
+                "job_id": child_job_id,
+                "bulk_job_id": bulk_job_id,
+                "strategy_id": strategy_id,
+                "strategy_class": strategy_class,
+                "strategy_version": strategy_version,
+                "vt_symbol": symbol,
+                "start_date": start_date,
+                "end_date": end_date,
+                "parameters": json.dumps(parameters) if parameters else "{}",
+                "status": status,
+                "result": json.dumps(result) if result else None,
+                "error": error,
+                "created_at": now,
+                "completed_at": now if status in ("completed", "failed") else None,
+            }
+        )
+        conn.commit()
+    except Exception as e:
+        print(f"[Worker] Error saving bulk child {child_job_id}: {e}")
+    finally:
+        conn.close()
+
+
+def _update_bulk_row(job_id, completed_count, best_return, best_symbol):
+    """Incremental update of the bulk_backtest row."""
+    conn = get_db_connection()
+    try:
+        conn.execute(
+            text("""
+                UPDATE bulk_backtest
+                SET completed_count = :cc, best_return = :br, best_symbol = :bs
+                WHERE job_id = :jid
+            """),
+            {"cc": completed_count, "br": best_return, "bs": best_symbol, "jid": job_id}
+        )
+        conn.commit()
+    except Exception as e:
+        print(f"[Worker] Error updating bulk row: {e}")
+    finally:
+        conn.close()
+
+
+def _finish_bulk_row(job_id, status, best_return, best_symbol, completed_count):
+    """Mark bulk_backtest row as completed/failed."""
+    conn = get_db_connection()
+    try:
+        conn.execute(
+            text("""
+                UPDATE bulk_backtest
+                SET status = :st, completed_count = :cc,
+                    best_return = :br, best_symbol = :bs,
+                    completed_at = :ca
+                WHERE job_id = :jid
+            """),
+            {
+                "st": status, "cc": completed_count,
+                "br": best_return, "bs": best_symbol,
+                "ca": datetime.utcnow(), "jid": job_id,
+            }
+        )
+        conn.commit()
+    except Exception as e:
+        print(f"[Worker] Error finishing bulk row: {e}")
+    finally:
+        conn.close()
 
 
 def run_optimization_task(

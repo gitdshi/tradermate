@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS backtest_history (
     id INT AUTO_INCREMENT PRIMARY KEY,
     user_id INT NOT NULL,
     job_id VARCHAR(36) NOT NULL UNIQUE,
+    bulk_job_id VARCHAR(36),
     strategy_id INT,
     strategy_class VARCHAR(100),
     strategy_version INT,
@@ -65,9 +66,43 @@ CREATE TABLE IF NOT EXISTS backtest_history (
     FOREIGN KEY (strategy_id) REFERENCES strategies(id) ON DELETE SET NULL,
     INDEX idx_user_id (user_id),
     INDEX idx_job_id (job_id),
+    INDEX idx_bulk_job_id (bulk_job_id),
     INDEX idx_status (status),
     INDEX idx_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Backtest execution history';
+
+-- -----------------------------------------------------------------------------
+-- Bulk backtest table - tracks multi-symbol bulk backtest jobs
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS bulk_backtest (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    job_id VARCHAR(36) NOT NULL UNIQUE,
+    strategy_id INT,
+    strategy_class VARCHAR(100),
+    strategy_version INT,
+    symbols JSON NOT NULL,
+    start_date DATE,
+    end_date DATE,
+    parameters JSON,
+    initial_capital DOUBLE DEFAULT 100000,
+    rate DOUBLE DEFAULT 0.0001,
+    slippage DOUBLE DEFAULT 0,
+    benchmark VARCHAR(50) DEFAULT '399300.SZ',
+    status VARCHAR(20) NOT NULL DEFAULT 'queued',
+    total_symbols INT DEFAULT 0,
+    completed_count INT DEFAULT 0,
+    best_return DOUBLE,
+    best_symbol VARCHAR(50),
+    created_at DATETIME NOT NULL,
+    completed_at DATETIME,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (strategy_id) REFERENCES strategies(id) ON DELETE SET NULL,
+    INDEX idx_user_id (user_id),
+    INDEX idx_job_id (job_id),
+    INDEX idx_status (status),
+    INDEX idx_created_at (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Bulk backtest jobs tracking';
 
 -- -----------------------------------------------------------------------------
 -- Watchlists table - stores user stock watchlists

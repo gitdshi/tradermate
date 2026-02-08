@@ -107,3 +107,27 @@ async def get_sectors(
     """Get sector information."""
     service = DataService()
     return service.get_sectors()
+
+
+@router.get("/exchanges")
+async def get_exchanges(
+    current_user: Optional[TokenData] = Depends(get_current_user_optional)
+):
+    """Get exchange-level stock groupings (SSE, SZSE, BSE)."""
+    service = DataService()
+    return service.get_exchanges()
+
+
+@router.get("/symbols-by-filter")
+async def get_symbols_by_filter(
+    industry: Optional[str] = Query(None, description="Filter by industry name"),
+    exchange: Optional[str] = Query(None, description="Filter by exchange: SSE, SZSE, BSE"),
+    limit: int = Query(500, le=2000),
+    current_user: Optional[TokenData] = Depends(get_current_user_optional)
+):
+    """
+    Get symbol list filtered by industry and/or exchange.
+    Returns ts_code, name, industry, exchange for use in bulk backtest symbol picker.
+    """
+    service = DataService()
+    return service.get_symbols_by_filter(industry=industry, exchange=exchange, limit=limit)

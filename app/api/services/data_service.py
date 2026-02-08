@@ -246,3 +246,72 @@ class DataService:
             
         finally:
             conn.close()
+
+    def get_exchanges(self) -> List[Dict[str, Any]]:
+        """Get exchange-level groupings with counts."""
+        conn = get_tushare_connection()
+        try:
+            result = conn.execute(text("""
+                SELECT exchange, COUNT(*) as count
+                FROM stock_basic
+                WHERE list_status = 'L'
+                GROUP BY exchange
+                ORDER BY count DESC
+            """))
+            exchange_map = {"SZ": "SZSE", "SH": "SSE", "BJ": "BSE"}
+            return [
+                {"code": exchange_map.get(row.exchange, row.exchange),
+                 "name": row.exchange, "count": row.count}
+                for row in result.fetchall()
+            ]
+        finally:
+            conn.close()
+
+    def get_symbols_by_filter(
+        self,
+        industry: Optional[str] = None,
+        exchange: Optional[str] = None,
+        limit: int = 500,
+    ) -> List[Dict[str, Any]]:
+        """Get symbols filtered by industry and/or exchange."""
+        conn = get_tushare_connection()
+        try:
+            query = """
+                SELECT ts_code, name, exchange, industry
+                FROM stock_basic
+                WHERE (list_status = 'L' OR list_status IS NULL)
+            """
+            params: Dict[str, Any] = {}
+
+            if industry:
+                query += " AND industry = :industry"
+                params["industry"] = industry
+
+            if exchange:
+                exch_map = {"SZSE": "SZ", "SSE": "SH", "BSE": "BJ",
+                            "SZ": "SZ", "SH": "SH", "BJ": "BJ"}
+                query += " AND exchange = :exchange"
+                params["exchange"] = exch_map.get(exchange.upper(), exchange)
+
+            query += " ORDER BY ts_code LIMIT :limit"
+            params["limit"] = limit
+
+            rows = conn.execute(text(query), params).fetchall()
+            exchange_map = {"SZ": "SZSE", "SH": "SSE", "BJ": "BSE"}
+            symbols = []
+            for row in rows:
+                ts_code = row.ts_code
+                code = ts_code.split(".")[0]
+                suffix = ts_code.split(".")[1] if "." in ts_code else "SZ"
+                vt_exchange = exchange_map.get(suffix, suffix)
+                symbols.append({
+                    "ts_code": ts_code,
+                    "symbol": code,
+                    "name": row.name,
+                    "exchange": vt_exchange,
+                    "vt_symbol": f"{code}.{vt_exchange}",
+                    "industry": row.industry,
+                })
+            return symbols
+        finally:
+            conn.close()
