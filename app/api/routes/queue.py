@@ -67,7 +67,8 @@ async def list_jobs(
                     if child_row and child_row.result:
                         try:
                             parsed = _json.loads(child_row.result) if isinstance(child_row.result, str) else child_row.result
-                            best_child_map[r.job_id] = parsed.get("statistics", {})
+                            # store full parsed result so we can access symbol_name and statistics
+                            best_child_map[r.job_id] = parsed
                         except Exception:
                             pass
 
@@ -84,9 +85,12 @@ async def list_jobs(
                     # Attach best child's full statistics
                     best_stats = best_child_map.get(j.get("job_id"))
                     if best_stats:
-                        j["result"]["best_annual_return"] = best_stats.get("annual_return")
-                        j["result"]["best_sharpe_ratio"] = best_stats.get("sharpe_ratio")
-                        j["result"]["best_max_drawdown"] = best_stats.get("max_drawdown_percent") or best_stats.get("max_drawdown")
+                        stats = best_stats.get("statistics", {}) if isinstance(best_stats, dict) else {}
+                        j["result"]["best_annual_return"] = stats.get("annual_return")
+                        j["result"]["best_sharpe_ratio"] = stats.get("sharpe_ratio")
+                        j["result"]["best_max_drawdown"] = stats.get("max_drawdown_percent") or stats.get("max_drawdown")
+                        # human-readable symbol name from saved child result
+                        j["result"]["best_symbol_name"] = best_stats.get("symbol_name") if isinstance(best_stats, dict) else None
         except Exception as e:
             print(f"[Queue] Error enriching bulk jobs: {e}")
         finally:

@@ -511,6 +511,7 @@ def run_bulk_backtest_task(
     failed_count = 0
     best_return = None
     best_symbol = None
+    best_symbol_name = None
 
     try:
         print(f"[Worker] Starting bulk backtest job {job_id}")
@@ -557,6 +558,11 @@ def run_bulk_backtest_task(
                     if ret is not None and (best_return is None or ret > best_return):
                         best_return = ret
                         best_symbol = symbol
+                        # capture human-readable symbol name from child result
+                        try:
+                            best_symbol_name = result.get("symbol_name") or None
+                        except Exception:
+                            best_symbol_name = None
                 else:
                     failed_count += 1
 
@@ -579,8 +585,8 @@ def run_bulk_backtest_task(
             pct = int(completed / total * 100)
             job_storage.update_progress(job_id, pct, f"{completed}/{total} symbols done")
 
-            # Update bulk_backtest row
-            _update_bulk_row(job_id, completed, best_return, best_symbol)
+            # Update bulk_backtest row (include best symbol name when available)
+            _update_bulk_row(job_id, completed, best_return, best_symbol, best_symbol_name)
 
         # Final result summary stored in Redis for the parent job
         summary = {
@@ -591,13 +597,14 @@ def run_bulk_backtest_task(
             "failed": failed_count,
             "best_return": best_return,
             "best_symbol": best_symbol,
+            "best_symbol_name": best_symbol_name,
             "completed_at": datetime.now().isoformat(),
         }
         job_storage.update_job_status(job_id, "finished")
         job_storage.save_result(job_id, summary)
 
         # Mark DB row completed
-        _finish_bulk_row(job_id, "completed", best_return, best_symbol, total)
+        _finish_bulk_row(job_id, "completed", best_return, best_symbol, best_symbol_name, total)
 
         print(f"[Worker] Bulk backtest {job_id} done: {successful} ok, {failed_count} failed")
         return summary
@@ -611,7 +618,7 @@ def run_bulk_backtest_task(
         except Exception:
             pass
         if job_id:
-            _finish_bulk_row(job_id, "failed", best_return, best_symbol, successful + failed_count)
+            _finish_bulk_row(job_id, "failed", best_return, best_symbol, best_symbol_name, successful + failed_count)
         return {
             "job_id": job_id,
             "status": "failed",
@@ -668,7 +675,7 @@ def _save_bulk_child(child_job_id, bulk_job_id, user_id, strategy_id,
         conn.close()
 
 
-def _update_bulk_row(job_id, completed_count, best_return, best_symbol):
+def _update_bulk_row(job_id, completed_count, best_return, best_symbol, best_symbol_name=None):
     """Incremental update of the bulk_backtest row."""
     conn = get_db_connection()
     try:
@@ -676,9 +683,10 @@ def _update_bulk_row(job_id, completed_count, best_return, best_symbol):
             text("""
                 UPDATE bulk_backtest
                 SET completed_count = :cc, best_return = :br, best_symbol = :bs
+                """ + (", best_symbol_name = :bsn" if True else "") + """
                 WHERE job_id = :jid
             """),
-            {"cc": completed_count, "br": best_return, "bs": best_symbol, "jid": job_id}
+            {"cc": completed_count, "br": best_return, "bs": best_symbol, "bsn": best_symbol_name, "jid": job_id}
         )
         conn.commit()
     except Exception as e:
@@ -687,7 +695,7 @@ def _update_bulk_row(job_id, completed_count, best_return, best_symbol):
         conn.close()
 
 
-def _finish_bulk_row(job_id, status, best_return, best_symbol, completed_count):
+def _finish_bulk_row(job_id, status, best_return, best_symbol, best_symbol_name, completed_count):
     """Mark bulk_backtest row as completed/failed."""
     conn = get_db_connection()
     try:
@@ -696,12 +704,13 @@ def _finish_bulk_row(job_id, status, best_return, best_symbol, completed_count):
                 UPDATE bulk_backtest
                 SET status = :st, completed_count = :cc,
                     best_return = :br, best_symbol = :bs,
+                    best_symbol_name = :bsn,
                     completed_at = :ca
                 WHERE job_id = :jid
             """),
             {
                 "st": status, "cc": completed_count,
-                "br": best_return, "bs": best_symbol,
+                "br": best_return, "bs": best_symbol, "bsn": best_symbol_name,
                 "ca": datetime.utcnow(), "jid": job_id,
             }
         )
