@@ -557,7 +557,8 @@ def ingest_stock_basic(exchange=None, list_status='L'):
     params = {'exchange': exchange, 'list_status': list_status}
     aid = audit_start('stock_basic', params)
     try:
-        df = call_pro('stock_basic', exchange=exchange, list_status=list_status)
+        df = call_pro('stock_basic', exchange=exchange, list_status=list_status,
+                      fields='ts_code,symbol,name,area,industry,fullname,enname,market,exchange,list_status,list_date,delist_date,is_hs')
         rows = 0
         if not df.empty:
             insert_sql = text(

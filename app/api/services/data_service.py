@@ -204,7 +204,8 @@ class DataService:
             result = conn.execute(text("""
                 SELECT exchange, COUNT(*) as count
                 FROM stock_basic
-                WHERE list_status = 'L'
+                WHERE (list_status = 'L' OR list_status IS NULL)
+                  AND exchange IS NOT NULL
                 GROUP BY exchange
             """))
             exchange_counts = {row.exchange: row.count for row in result.fetchall()}
@@ -234,7 +235,8 @@ class DataService:
             result = conn.execute(text("""
                 SELECT industry, COUNT(*) as count
                 FROM stock_basic
-                WHERE list_status = 'L' AND industry IS NOT NULL
+                WHERE (list_status = 'L' OR list_status IS NULL)
+                  AND industry IS NOT NULL
                 GROUP BY industry
                 ORDER BY count DESC
             """))
@@ -248,20 +250,21 @@ class DataService:
             conn.close()
 
     def get_exchanges(self) -> List[Dict[str, Any]]:
-        """Get exchange-level groupings with counts, derived from ts_code suffix."""
+        """Get exchange-level groupings with counts."""
         conn = get_tushare_connection()
         try:
             result = conn.execute(text("""
-                SELECT SUBSTRING_INDEX(ts_code, '.', -1) AS exch, COUNT(*) as count
+                SELECT exchange, COUNT(*) as count
                 FROM stock_basic
-                GROUP BY exch
+                WHERE (list_status = 'L' OR list_status IS NULL)
+                  AND exchange IS NOT NULL
+                GROUP BY exchange
                 ORDER BY count DESC
             """))
-            exchange_map = {"SZ": "SZSE", "SH": "SSE", "BJ": "BSE"}
-            name_map = {"SZ": "深圳证券交易所", "SH": "上海证券交易所", "BJ": "北京证券交易所"}
+            name_map = {"SZSE": "深圳证券交易所", "SSE": "上海证券交易所", "BSE": "北京证券交易所"}
             return [
-                {"code": exchange_map.get(row.exch, row.exch),
-                 "name": name_map.get(row.exch, row.exch),
+                {"code": row.exchange,
+                 "name": name_map.get(row.exchange, row.exchange),
                  "count": row.count}
                 for row in result.fetchall()
             ]
@@ -289,11 +292,8 @@ class DataService:
                 params["industry"] = industry
 
             if exchange:
-                exch_map = {"SZSE": "SZ", "SSE": "SH", "BSE": "BJ",
-                            "SZ": "SZ", "SH": "SH", "BJ": "BJ"}
-                suffix = exch_map.get(exchange.upper(), exchange)
-                query += " AND ts_code LIKE :exch_suffix"
-                params["exch_suffix"] = f"%.{suffix}"
+                query += " AND exchange = :exchange"
+                params["exchange"] = exchange.upper()
 
             query += " ORDER BY ts_code LIMIT :limit"
             params["limit"] = limit
