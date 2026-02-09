@@ -381,6 +381,9 @@ class TurtleMAEnhancedStrategy(CtaTemplate):
     fixed_size: int = 1         # 每次开仓/加仓手数
     max_units: int = 4          # 最大持仓单元数
     pyramid_step: float = 0.5   # 加仓步长 (ATR倍数)
+    # 基于账户金额的仓位控制
+    unit_fraction: float = 0.01  # 每个单元占账户资金比例 (例如0.01 = 1% 每单元)
+    min_unit_size: int = 1       # 每个单元最小手数
 
     # 止损
     stop_loss_window: int = 20          # 标准差回看窗口
@@ -438,6 +441,8 @@ class TurtleMAEnhancedStrategy(CtaTemplate):
         "volatility_max", "volatility_min",
         "rsi_window", "rsi_overbought", "rsi_entry_max",
         "ma_slope_window",
+        # 账户金额仓位控制
+        "unit_fraction", "min_unit_size",
         # 开关
         "use_vol_confirm", "use_volatility_filter",
         "use_rsi_filter", "use_slope_filter",
@@ -449,6 +454,7 @@ class TurtleMAEnhancedStrategy(CtaTemplate):
         "ma_slope", "volatility",
         "long_entry", "long_stop", "unit_count",
         "std_fixed_stop", "std_trailing_stop",
+        "base_unit_size",
     ]
 
     # ==================================================================
@@ -477,6 +483,7 @@ class TurtleMAEnhancedStrategy(CtaTemplate):
 
         # 加仓计数器
         self.unit_count = 0
+        self.base_unit_size = 0  # 最近一次计算的单元手数
 
         # 加载历史K线：需要 slow_window + rsi_window + 余量
         bars_needed = max(self.slow_window, self.stop_loss_window) + self.rsi_window + 20
@@ -571,6 +578,26 @@ class TurtleMAEnhancedStrategy(CtaTemplate):
         else:
             self.ma_slope = 0.0
 
+    def _calc_unit_size(self, price: float) -> int:
+        """根据账户资金和当前价格计算每个单元的手数。
+
+        优先使用策略/回测环境提供的 `self.capital`（回测时由引擎设置）。
+        如果无法获取账户资金，则回退到 `fixed_size`。
+        """
+        try:
+            cap = getattr(self, 'capital', None)
+            if cap is None or cap <= 0:
+                return int(self.fixed_size)
+            alloc = float(cap) * float(self.unit_fraction)
+            if price <= 0:
+                return int(self.min_unit_size)
+            size = int(alloc / float(price))
+            if size < int(self.min_unit_size):
+                return int(self.min_unit_size)
+            return size
+        except Exception:
+            return int(self.fixed_size)
+
     # ==================================================================
     # 空仓处理 — 首次开仓判断
     # ==================================================================
@@ -622,7 +649,10 @@ class TurtleMAEnhancedStrategy(CtaTemplate):
             f"开仓信号: MA排列={self.fast_ma:.2f}>{self.mid_ma:.2f}>{self.slow_ma:.2f}, "
             f"RSI={self.rsi_value:.1f}, Vol比={bar.volume / self.vol_ma:.2f}"
         )
-        self.buy(bar.close_price * 1.01, self.fixed_size)  # 稍高于收盘价确保成交
+        size = self._calc_unit_size(bar.close_price)
+        # record base unit size used for later unit counting
+        self.base_unit_size = size
+        self.buy(bar.close_price * 1.01, size)  # 稍高于收盘价确保成交
 
     # ==================================================================
     # 持仓处理 — 止损 / 趋势反转平仓 / 加仓
@@ -684,7 +714,11 @@ class TurtleMAEnhancedStrategy(CtaTemplate):
                         f"海龟加仓: 第{self.unit_count + 1}单元, "
                         f"价格={bar.close_price:.2f} > 阈值={add_threshold:.2f}"
                     )
-                    self.buy(bar.close_price * 1.01, self.fixed_size)
+                    size = self._calc_unit_size(bar.close_price)
+                    # if base_unit_size not set yet (very unlikely), set it
+                    if not self.base_unit_size:
+                        self.base_unit_size = size
+                    self.buy(bar.close_price * 1.01, size)
 
     # ==================================================================
     # 成交回报
@@ -709,8 +743,9 @@ class TurtleMAEnhancedStrategy(CtaTemplate):
         self.long_entry = trade.price
         self.long_stop = trade.price - 2.0 * self.atr_value
 
-        # 更新加仓计数
-        self.unit_count = int(self.pos / self.fixed_size) if self.fixed_size > 0 else 0
+        # 更新加仓计数（使用最近计算的基准单元手数，如果不可用则回退到 fixed_size）
+        base = int(self.base_unit_size) if self.base_unit_size and self.base_unit_size > 0 else int(self.fixed_size)
+        self.unit_count = int(abs(self.pos) / base) if base > 0 else 0
 
         # 设置标准差止损
         if self.use_stop_loss and len(recent_closes) >= 2:
@@ -744,6 +779,7 @@ class TurtleMAEnhancedStrategy(CtaTemplate):
         self.long_entry = 0.0
         self.long_stop = 0.0
         self.unit_count = 0
+        self.base_unit_size = 0
         self.std_fixed_stop = 0.0
         self.std_trailing_stop = 0.0
         self.stop_loss_mgr.remove_position(vt_symbol)
