@@ -119,40 +119,7 @@ def init_db():
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """))
 
-        # Strategy files metadata table - linked to strategies as main table
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS strategy_files (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                strategy_id INT NOT NULL,
-                name VARCHAR(100) NOT NULL,
-                filename VARCHAR(200) NOT NULL,
-                source VARCHAR(20) NOT NULL,
-                path VARCHAR(500),
-                size BIGINT,
-                modified DATETIME,
-                hash VARCHAR(128),
-                created_at DATETIME NOT NULL,
-                updated_at DATETIME NOT NULL,
-                FOREIGN KEY (strategy_id) REFERENCES strategies(id) ON DELETE CASCADE,
-                UNIQUE KEY unique_file (name, source),
-                INDEX idx_strategy_id (strategy_id)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-        """))
-
-        # Strategy file history (stores content snapshots)
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS strategy_file_history (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                strategy_file_id INT,
-                name VARCHAR(200),
-                content LONGTEXT,
-                created_at DATETIME NOT NULL,
-                FOREIGN KEY (strategy_file_id) REFERENCES strategy_files(id) ON DELETE CASCADE,
-                INDEX idx_strategy_file_id (strategy_file_id)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-        """))
-
-        # Strategy code history for DB-managed strategies
+        # Strategy code history - stores historical snapshots of DB strategy code
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS strategy_code_history (
                 id INT AUTO_INCREMENT PRIMARY KEY,
