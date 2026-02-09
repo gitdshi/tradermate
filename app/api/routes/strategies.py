@@ -1,8 +1,6 @@
 """Strategy CRUD routes."""
 from datetime import datetime
 from typing import List
-from pathlib import Path
-import os
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import text
 
@@ -19,70 +17,6 @@ from app.api.services.db import get_db_connection
 from app.api.services.strategy_service import validate_strategy_code
 
 router = APIRouter(prefix="/strategies", tags=["Strategies"])
-
-
-def save_strategy_to_file(strategy_id: int, class_name: str, code: str, conn):
-    """Save strategy code to physical file and track in strategy_files table."""
-    # Determine file path - use data/tradermate/strategies directory under project root
-    # Go up from tradermate/app/api/routes/ to project root TraderMate/
-    project_root = Path(__file__).resolve().parent.parent.parent.parent.parent
-    base_dir = project_root / "data" / "tradermate" / "strategies"
-    base_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Convert class name to snake_case filename
-    import re
-    filename = re.sub(r'(?<!^)(?=[A-Z])', '_', class_name).lower() + '.py'
-    file_path = base_dir / filename
-    
-    # Write code to file
-    file_path.write_text(code, encoding='utf-8')
-    print(f"[save_strategy_to_file] Wrote code to {file_path}")
-    
-    # Track file in strategy_files table
-    # First check if file already tracked
-    result = conn.execute(
-        text("SELECT id FROM strategy_files WHERE strategy_id = :sid AND path = :path"),
-        {"sid": strategy_id, "path": str(file_path)}
-    )
-    existing_file = result.fetchone()
-    
-    if not existing_file:
-        # Insert new file record
-        import os
-        file_stat = os.stat(file_path)
-        conn.execute(
-            text("""
-                INSERT INTO strategy_files (strategy_id, name, filename, source, path, size, modified, created_at, updated_at)
-                VALUES (:sid, :name, :filename, :source, :path, :size, :modified, :created_at, :updated_at)
-            """),
-            {
-                "sid": strategy_id,
-                "name": class_name,
-                "filename": filename,
-                "source": "data",
-                "path": str(file_path),
-                "size": file_stat.st_size,
-                "modified": datetime.fromtimestamp(file_stat.st_mtime),
-                "created_at": datetime.utcnow(),
-                "updated_at": datetime.utcnow()
-            }
-        )
-    else:
-        # Update existing file record
-        import os
-        file_stat = os.stat(file_path)
-        conn.execute(
-            text("UPDATE strategy_files SET size = :size, modified = :modified, updated_at = :updated_at WHERE id = :id"),
-            {
-                "id": existing_file.id, 
-                "size": file_stat.st_size,
-                "modified": datetime.fromtimestamp(file_stat.st_mtime),
-                "updated_at": datetime.utcnow()
-            }
-        )
-    
-    conn.commit()
-    return str(file_path)
 
 
 @router.get("", response_model=List[StrategyListItem])
@@ -174,14 +108,6 @@ async def create_strategy(
 
         strategy_id = result.lastrowid
         print(f"[create_strategy] inserted id={strategy_id} for user_id={current_user.user_id}")
-        
-        # Save code to file if provided
-        if strategy_data.code:
-            try:
-                save_strategy_to_file(strategy_id, strategy_data.class_name, strategy_data.code, conn)
-            except Exception as e:
-                print(f"[create_strategy] Failed to save file: {e}")
-                # Don't fail the entire operation if file save fails
 
         return Strategy(
             id=strategy_id,
@@ -350,21 +276,6 @@ async def update_strategy(
                 params
             )
             conn.commit()
-            
-            # Save code to file if code was updated
-            if strategy_data.code is not None and strategy_data.code.strip():
-                try:
-                    # Get class_name for file naming
-                    result = conn.execute(
-                        text("SELECT class_name FROM strategies WHERE id = :strategy_id"),
-                        {"strategy_id": strategy_id}
-                    )
-                    row = result.fetchone()
-                    if row:
-                        save_strategy_to_file(strategy_id, row.class_name, strategy_data.code, conn)
-                except Exception as e:
-                    print(f"[update_strategy] Failed to save file: {e}")
-                    # Don't fail the entire operation if file save fails
         
         # Fetch updated strategy
         return await get_strategy(strategy_id, current_user)
@@ -377,86 +288,31 @@ async def delete_strategy(
     strategy_id: int,
     current_user: TokenData = Depends(get_current_user)
 ):
-    """Delete a strategy and all associated files."""
-    import os
+    """Delete a strategy from database."""
     conn = get_db_connection()
     
     try:
-        # Get strategy name and associated files before deletion
+        # Check if strategy exists
         result = conn.execute(
-            text("""
-                SELECT s.name, sf.path, sf.source
-                FROM strategies s
-                LEFT JOIN strategy_files sf ON s.id = sf.strategy_id
-                WHERE s.id = :strategy_id AND s.user_id = :user_id
-            """),
+            text("SELECT id FROM strategies WHERE id = :strategy_id AND user_id = :user_id"),
             {"strategy_id": strategy_id, "user_id": current_user.user_id}
         )
-        rows = result.fetchall()
+        strategy = result.fetchone()
         
-        if not rows:
+        if not strategy:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Strategy not found"
             )
         
-        strategy_name = rows[0].name
-        
-        # Delete physical files tracked in database
-        for row in rows:
-            if row.path and os.path.exists(row.path):
-                try:
-                    os.remove(row.path)
-                    print(f"[delete_strategy] Deleted file: {row.path}")
-                except Exception as e:
-                    print(f"[delete_strategy] Failed to delete file {row.path}: {e}")
-        
-        # Get class_name for finding snake_case filename
-        result = conn.execute(
-            text("SELECT class_name FROM strategies WHERE id = :strategy_id"),
-            {"strategy_id": strategy_id}
-        )
-        class_row = result.fetchone()
-        if class_row:
-            import re
-            snake_case_name = re.sub(r'(?<!^)(?=[A-Z])', '_', class_row.class_name).lower()
-            
-            # Also try to delete .py files by strategy name in common locations
-            project_root = Path(__file__).resolve().parent.parent.parent.parent.parent
-            possible_locations = [
-                project_root / "data" / "tradermate" / "strategies" / f"{snake_case_name}.py",
-                Path("tradermate/strategies") / f"{snake_case_name}.py",
-            ]
-            
-            for file_path in possible_locations:
-                if file_path.exists():
-                    try:
-                        file_path.unlink()
-                        print(f"[delete_strategy] Deleted file: {file_path}")
-                        
-                        # Delete history files in .history/ directory
-                        history_dir = file_path.parent / ".history"
-                        if history_dir.exists():
-                            import glob
-                            pattern = str(history_dir / f"{snake_case_name}-*.py")
-                            history_files = glob.glob(pattern)
-                            for hist_file in history_files:
-                                try:
-                                    os.remove(hist_file)
-                                    print(f"[delete_strategy] Deleted history file: {hist_file}")
-                                except Exception as e:
-                                    print(f"[delete_strategy] Failed to delete history file {hist_file}: {e}")
-                    except Exception as e:
-                        print(f"[delete_strategy] Failed to delete {file_path}: {e}")
-        
         # Delete from database (CASCADE will handle related tables)
-        result = conn.execute(
+        conn.execute(
             text("DELETE FROM strategies WHERE id = :strategy_id AND user_id = :user_id"),
             {"strategy_id": strategy_id, "user_id": current_user.user_id}
         )
         conn.commit()
         
-        print(f"[delete_strategy] Deleted strategy '{strategy_name}' (id={strategy_id}) and all associated files")
+        print(f"[delete_strategy] Deleted strategy (id={strategy_id})")
         
     finally:
         conn.close()

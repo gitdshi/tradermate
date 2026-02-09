@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.config import get_settings
 from app.api.services.db import init_db
-from app.api.routes import auth, strategies, data, backtest, queue, strategy_files
+from app.api.routes import auth, strategies, data, backtest, queue
 
 settings = get_settings()
 
@@ -56,7 +56,6 @@ app.add_middleware(
 # Include routers
 app.include_router(auth.router, prefix="/api")
 app.include_router(strategies.router, prefix="/api")
-app.include_router(strategy_files.router, prefix="/api")
 app.include_router(data.router, prefix="/api")
 app.include_router(backtest.router, prefix="/api")
 app.include_router(queue.router, prefix="/api")
