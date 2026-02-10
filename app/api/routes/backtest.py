@@ -279,7 +279,8 @@ async def run_backtest_task(job_id: str, request: BacktestRequest, user_id: int)
             capital=request.capital,
             rate=request.rate,
             slippage=request.slippage,
-            size=request.size
+            size=request.size,
+            benchmark=getattr(request, 'benchmark', None)
         )
         
         job.status = BacktestStatus.COMPLETED
@@ -375,7 +376,8 @@ async def run_batch_backtest_task(job_id: str, request: BatchBacktestRequest, us
                     capital=request.capital,
                     rate=request.rate,
                     slippage=request.slippage,
-                    size=request.size
+                    size=request.size,
+                    benchmark=getattr(request, 'benchmark', None)
                 )
                 if result:
                     results.append(result)

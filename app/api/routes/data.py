@@ -118,6 +118,15 @@ async def get_exchanges(
     return service.get_exchanges()
 
 
+@router.get("/indexes")
+async def get_indexes(
+    current_user: Optional[TokenData] = Depends(get_current_user_optional)
+):
+    """Return available index codes from AkShare for benchmark selection."""
+    service = DataService()
+    return service.get_indexes()
+
+
 @router.get("/symbols-by-filter")
 async def get_symbols_by_filter(
     industry: Optional[str] = Query(None, description="Filter by industry name"),

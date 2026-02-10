@@ -5,7 +5,7 @@ import pandas as pd
 from sqlalchemy import text
 
 from app.api.config import get_settings
-from app.api.services.db import get_tushare_connection, get_vnpy_engine
+from app.api.services.db import get_tushare_connection, get_vnpy_engine, get_akshare_connection
 from app.backtest.ts_utils import moving_average, pct_change
 
 settings = get_settings()
@@ -315,5 +315,35 @@ class DataService:
                     "industry": row.industry,
                 })
             return symbols
+        finally:
+            conn.close()
+
+    def get_indexes(self) -> List[Dict[str, str]]:
+        """Return available index codes from akshare.index_daily with friendly labels."""
+        conn = get_akshare_connection()
+        try:
+            result = conn.execute(text("SELECT DISTINCT index_code FROM index_daily ORDER BY index_code"))
+            rows = result.fetchall()
+            # Friendly mapping for common indexes
+            name_map = {
+                '399300.SZ': 'HS300 (沪深300)',
+                '000300.SH': 'HS300 (沪深300)',
+                '000016.SH': 'SSE50 (上证50)',
+                '000905.SH': 'CSI500 (中证500)',
+                '399006.SZ': 'ChiNext (创业板指)',
+                '000001.SH': 'SSE Composite (上证综指)',
+                '399001.SZ': 'SZSE Component (深证成指)',
+                '000852.SH': 'CSI1000 (中证1000)',
+                '000688.SH': 'STAR Market (科创板)',
+                '399005.SZ': 'Small/Mid Cap Index (中小板指)'
+            }
+
+            indexes = []
+            for row in rows:
+                code = row.index_code
+                label = name_map.get(code, code)
+                indexes.append({"value": code, "label": label})
+
+            return indexes
         finally:
             conn.close()

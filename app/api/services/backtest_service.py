@@ -261,7 +261,8 @@ class BacktestService:
         capital: float = 100000.0,
         rate: float = 0.0001,
         slippage: float = 0.0,
-        size: int = 1
+        size: int = 1,
+        benchmark: Optional[str] = None
     ) -> Optional[BacktestResult]:
         """Run a single backtest."""
         # Get strategy class
@@ -355,14 +356,15 @@ class BacktestService:
                 })
             result.stock_price_curve = stock_prices
         
-        # Calculate alpha and beta against HS300 benchmark
-        benchmark_data = get_benchmark_data(start_date, end_date, "000300.SH")
+        # Calculate alpha and beta against chosen benchmark (fallback to HS300)
+        bm_symbol = benchmark or "000300.SH"
+        benchmark_data = get_benchmark_data(start_date, end_date, bm_symbol)
         if benchmark_data and strategy_daily_returns is not None:
             alpha, beta = calculate_alpha_beta(strategy_daily_returns, benchmark_data["returns"])
             result.alpha = alpha
             result.beta = beta
             result.benchmark_return = benchmark_data["total_return"]
-            result.benchmark_symbol = "000300.SH"
+            result.benchmark_symbol = bm_symbol
             
             # Add benchmark price curve
             if "prices" in benchmark_data:
