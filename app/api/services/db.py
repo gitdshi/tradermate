@@ -1,4 +1,5 @@
 """Database connection utilities."""
+import os
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection
 
@@ -9,6 +10,7 @@ settings = get_settings()
 # Create engines
 _tradermate_engine = None
 _tushare_engine = None
+_akshare_engine = None
 
 
 def get_tradermate_engine():
@@ -32,6 +34,17 @@ def get_tushare_engine():
     return _tushare_engine
 
 
+def get_akshare_engine():
+    """Get SQLAlchemy engine for akshare database."""
+    global _akshare_engine
+    if _akshare_engine is None:
+        ak_url = os.getenv('AKSHARE_DATABASE_URL')
+        if not ak_url:
+            ak_url = f"{settings.mysql_url}/akshare?charset=utf8mb4"
+        _akshare_engine = create_engine(ak_url, pool_pre_ping=True)
+    return _akshare_engine
+
+
 def get_db_connection() -> Connection:
     """Get a connection to the tradermate database."""
     engine = get_tradermate_engine()
@@ -41,6 +54,12 @@ def get_db_connection() -> Connection:
 def get_tushare_connection() -> Connection:
     """Get a connection to the tushare database."""
     engine = get_tushare_engine()
+    return engine.connect()
+
+
+def get_akshare_connection() -> Connection:
+    """Get a connection to the akshare database."""
+    engine = get_akshare_engine()
     return engine.connect()
 
 

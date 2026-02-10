@@ -71,33 +71,46 @@ def get_benchmark_data(start_date: date, end_date: date, benchmark_symbol: str =
     Returns:
         Dict with 'returns' (daily returns array) and 'total_return' (cumulative return)
     """
-    conn = get_tushare_connection()
+    # Benchmark (index) data now comes from the AkShare DB directly
+    from app.api.services.db import get_akshare_connection
+    conn = get_akshare_connection()
     
     try:
-        # Query index daily data (HS300 is in index_daily table)
-        # Note: index_daily uses 'index_code' column, not 'ts_code'
-        query = """
-            SELECT trade_date, close
-            FROM index_daily
-            WHERE index_code = :index_code
-              AND trade_date >= :start_date
-              AND trade_date <= :end_date
-            ORDER BY trade_date ASC
-        """
-        
-        result = conn.execute(text(query), {
-            "index_code": benchmark_symbol,
-            "start_date": start_date.strftime("%Y%m%d"),
-            "end_date": end_date.strftime("%Y%m%d")
-        })
-        rows = result.fetchall()
-        
+        # Try a few index_code variants (caller may pass Tushare-style codes)
+        candidates = [benchmark_symbol]
+        # Heuristic: map Tushare '000300.SH' -> AkShare '399300.SZ'
+        if benchmark_symbol and benchmark_symbol.endswith('.SH') and benchmark_symbol.startswith('000'):
+            candidates.append(benchmark_symbol.replace('000', '399').replace('.SH', '.SZ'))
+        # Also try switching .SH/.SZ suffixes if present
+        if benchmark_symbol and (benchmark_symbol.endswith('.SH') or benchmark_symbol.endswith('.SZ')):
+            alt = benchmark_symbol[:-3] + ('.SZ' if benchmark_symbol.endswith('.SH') else '.SH')
+            candidates.append(alt)
+
+        rows = []
+        for idx_code in dict.fromkeys(candidates):
+            query = """
+                SELECT trade_date, close
+                FROM index_daily
+                WHERE index_code = :index_code
+                  AND trade_date >= :start_date
+                  AND trade_date <= :end_date
+                ORDER BY trade_date ASC
+            """
+            result = conn.execute(text(query), {
+                "index_code": idx_code,
+                "start_date": start_date.strftime("%Y-%m-%d"),
+                "end_date": end_date.strftime("%Y-%m-%d")
+            })
+            rows = result.fetchall()
+            if rows and len(rows) >= 2:
+                break
+
         if not rows or len(rows) < 2:
             return None
-        
-        # Extract dates and closes
+
+        # Extract dates and closes (trade_date may be a date object)
         dates = [row.trade_date for row in rows]
-        closes = np.array([float(row.close) for row in rows])
+        closes = np.array([float(row.close) for row in rows], dtype=float)
         
         # Calculate daily returns
         daily_returns = np.diff(closes) / closes[:-1]
@@ -105,13 +118,27 @@ def get_benchmark_data(start_date: date, end_date: date, benchmark_symbol: str =
         # Calculate total return
         total_return = (closes[-1] - closes[0]) / closes[0] * 100
         
-        # Format prices for chart
+        # Format prices for chart; handle DATE objects and strings
         prices = []
-        for date_str, close_val in zip(dates, closes):
-            # Convert YYYYMMDD to ISO format
-            dt_obj = datetime.strptime(date_str, "%Y%m%d")
+        for dt_val, close_val in zip(dates, closes):
+            if isinstance(dt_val, str):
+                # Try common formats
+                try:
+                    dt_obj = datetime.strptime(dt_val, "%Y%m%d")
+                except Exception:
+                    try:
+                        dt_obj = datetime.fromisoformat(dt_val)
+                    except Exception:
+                        dt_obj = None
+            else:
+                # likely a datetime.date object
+                try:
+                    dt_obj = datetime.combine(dt_val, datetime.min.time())
+                except Exception:
+                    dt_obj = None
+
             prices.append({
-                "datetime": dt_obj.isoformat(),
+                "datetime": dt_obj.isoformat() if dt_obj else None,
                 "close": float(close_val)
             })
         

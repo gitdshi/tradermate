@@ -487,7 +487,8 @@ class BacktestServiceV2:
                 except Exception:
                     result_data = None
 
-            # Look up symbol name
+            # Look up symbol name: prefer Tushare stock_basic, but for index symbols
+            # fall back to AkShare index information or a friendly 'Index {code}' name.
             symbol_name = ""
             try:
                 from app.api.services.db import get_tushare_connection
@@ -497,12 +498,31 @@ class BacktestServiceV2:
                         text("SELECT name FROM stock_basic WHERE ts_code = :s LIMIT 1"),
                         {"s": row.vt_symbol}
                     ).fetchone()
-                    if srow:
+                    if srow and getattr(srow, 'name', None):
                         symbol_name = srow.name
                 finally:
                     ts_conn.close()
             except Exception:
                 pass
+
+            # If still empty and the symbol looks like an index code, try AkShare
+            if not symbol_name and isinstance(row.vt_symbol, str) and len(row.vt_symbol) >= 9:
+                try:
+                    from app.api.services.db import get_akshare_connection
+                    ak_conn = get_akshare_connection()
+                    try:
+                        irow = ak_conn.execute(
+                            text("SELECT trade_date, close FROM index_daily WHERE index_code = :c ORDER BY trade_date DESC LIMIT 1"),
+                            {"c": row.vt_symbol}
+                        ).fetchone()
+                        if irow:
+                            symbol_name = f"Index {row.vt_symbol}"
+                    finally:
+                        ak_conn.close()
+                except Exception:
+                    # As a last resort, use a generic index label
+                    if not symbol_name:
+                        symbol_name = f"Index {row.vt_symbol}"
 
             # Look up strategy name
             strategy_name = row.strategy_class or ""

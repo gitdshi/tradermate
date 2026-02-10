@@ -17,7 +17,7 @@ from vnpy.trader.constant import Interval
 from vnpy_ctastrategy.backtesting import BacktestingEngine
 from app.backtest.ts_utils import moving_average, pct_change
 from app.api.services.strategy_service import compile_strategy
-from app.api.services.db import get_db_connection, get_tushare_connection
+from app.api.services.db import get_db_connection, get_akshare_connection
 from app.api.services.job_storage import get_job_storage
 from sqlalchemy import text
 
@@ -104,7 +104,8 @@ def get_benchmark_data_for_worker(start_date: str, end_date: str, benchmark_symb
     """
     Fetch HS300 benchmark data for the given period (worker version).
     """
-    conn = get_tushare_connection()
+    # Use AkShare DB for benchmark/index data
+    conn = get_akshare_connection()
     
     try:
         # Convert date format - handle both string and date objects
@@ -130,8 +131,8 @@ def get_benchmark_data_for_worker(start_date: str, end_date: str, benchmark_symb
         
         result = conn.execute(text(query), {
             "index_code": benchmark_symbol,
-            "start_date": start_dt.strftime("%Y%m%d"),
-            "end_date": end_dt.strftime("%Y%m%d")
+            "start_date": start_dt.strftime("%Y-%m-%d"),
+            "end_date": end_dt.strftime("%Y-%m-%d")
         })
         rows = result.fetchall()
         
@@ -149,7 +150,11 @@ def get_benchmark_data_for_worker(start_date: str, end_date: str, benchmark_symb
         for date_val, close_val in zip(dates, closes):
             # Handle both string (YYYYMMDD) and datetime.date objects from DB
             if isinstance(date_val, str):
-                dt_obj = datetime.strptime(date_val, "%Y%m%d")
+                # AkShare may return 'YYYY-MM-DD' strings
+                try:
+                    dt_obj = datetime.strptime(date_val, "%Y-%m-%d")
+                except Exception:
+                    dt_obj = datetime.strptime(date_val, "%Y%m%d")
             else:
                 # Already a date/datetime object
                 dt_obj = datetime.combine(date_val, datetime.min.time()) if not isinstance(date_val, datetime) else date_val

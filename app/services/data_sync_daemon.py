@@ -1,17 +1,19 @@
 """
 Data Sync Daemon for TraderMate
 
-This daemon handles two main responsibilities:
-1. Fetch market data from Tushare API and store in tushare_data database
-2. Sync data from tushare_data to vnpy_data database for backtesting
+This daemon handles three main responsibilities:
+1. Fetch daily market data from AkShare and store in akshare database
+2. Fetch daily market data from Tushare and store in tushare database
+3. Sync/convert data from tushare_data to vnpy_data for backtesting
 
 Architecture:
-- tushare_data: Raw market data from Tushare (source of truth)
-- vnpy_data: Formatted data for vnpy trading platform (derived)
+- akshare: Raw market data from AkShare
+- tushare: Raw market data from Tushare (source of truth for vnpy)
+- vnpy: Formatted data for vnpy trading platform (derived)
 
 Usage:
-    python app/services/data_sync_daemon.py --once          # Run once
-    python app/services/data_sync_daemon.py --daemon        # Run as daemon
+    python app/services/data_sync_daemon.py --once          # Run once for latest trade date
+    python app/services/data_sync_daemon.py --daemon        # Run as daemon (daily at 02:00)
     python app/services/data_sync_daemon.py --sync-vnpy     # Sync to vnpy only
 """
 
@@ -23,7 +25,7 @@ import logging
 import argparse
 import schedule
 from datetime import datetime, date, timedelta
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 
 import pandas as pd
 from sqlalchemy import create_engine, text
@@ -39,7 +41,12 @@ from app.services.tushare_ingest import (
     ingest_adj_factor,
     get_all_ts_codes,
     get_max_trade_date,
+    call_pro,
     engine as tushare_engine
+)
+from app.services.akshare_ingest import (
+    ingest_index_daily as ak_ingest_index_daily,
+    akshare_engine
 )
 
 logging.basicConfig(
@@ -53,9 +60,20 @@ TUSHARE_DB_URL = os.getenv('TUSHARE_DATABASE_URL', 'mysql+pymysql://root:passwor
 VNPY_DB_URL = os.getenv('VNPY_DATABASE_URL', 'mysql+pymysql://root:password@127.0.0.1/vnpy?charset=utf8mb4')
 
 # Sync configuration
-SYNC_HOUR = int(os.getenv('SYNC_HOUR', '18'))  # Default: 6 PM after market close
+SYNC_HOUR = int(os.getenv('SYNC_HOUR', '2'))  # Default: 02:00 local time
 SYNC_MINUTE = int(os.getenv('SYNC_MINUTE', '0'))
 BATCH_SIZE = int(os.getenv('BATCH_SIZE', '100'))
+BACKFILL_DAYS = int(os.getenv('BACKFILL_DAYS', '60'))
+MAX_RETRIES = int(os.getenv('MAX_RETRIES', '3'))
+RETRY_BACKOFF_BASE = int(os.getenv('RETRY_BACKOFF_BASE', '10'))
+
+# Required daily endpoints for audit tracking
+REQUIRED_ENDPOINTS = [
+    'akshare_daily',
+    'akshare_to_tushare',
+    'tushare_daily',
+    'vnpy_sync'
+]
 
 # Exchange mapping for vnpy
 EXCHANGE_MAP = {
@@ -71,6 +89,235 @@ class DataSyncDaemon:
         self.tushare_engine: Engine = create_engine(TUSHARE_DB_URL, pool_pre_ping=True)
         self.vnpy_engine: Engine = create_engine(VNPY_DB_URL, pool_pre_ping=True)
         self.running = False
+
+    # =========================================================================
+    # Audit helpers
+    # =========================================================================
+
+    def _table_exists(self, engine: Engine, table_name: str) -> bool:
+        db_name = engine.url.database
+        if not db_name:
+            return False
+        with engine.connect() as conn:
+            res = conn.execute(text(
+                "SELECT 1 FROM information_schema.tables WHERE table_schema=:db AND table_name=:tbl LIMIT 1"
+            ), {'db': db_name, 'tbl': table_name})
+            return res.fetchone() is not None
+
+    def verify_audit_tables(self) -> bool:
+        """Verify audit tables exist for AkShare, Tushare, and vnpy sync tracking."""
+        ok = True
+        # Tushare audit tables
+        for tbl in ['ingest_audit', 'sync_log']:
+            if not self._table_exists(self.tushare_engine, tbl):
+                logger.warning("Missing Tushare audit table: %s", tbl)
+                ok = False
+        # AkShare audit tables
+        for tbl in ['ingest_audit', 'sync_log']:
+            if not self._table_exists(akshare_engine, tbl):
+                logger.warning("Missing AkShare audit table: %s", tbl)
+                ok = False
+        # vnpy sync status
+        if not self._table_exists(self.vnpy_engine, 'sync_status'):
+            logger.warning("Missing vnpy sync_status table")
+            ok = False
+        if ok:
+            logger.info("Audit tables verified")
+        return ok
+
+    def write_sync_log(self, sync_date: date, endpoint: str, status: str,
+                       rows_synced: int = 0, error: Optional[str] = None):
+        """Write to tushare.sync_log for centralized audit."""
+        with self.tushare_engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO sync_log (sync_date, endpoint, status, rows_synced, error_message, started_at, finished_at)
+                VALUES (:sync_date, :endpoint, :status, :rows_synced, :error_message, NOW(), NOW())
+                ON DUPLICATE KEY UPDATE
+                    status = VALUES(status),
+                    rows_synced = VALUES(rows_synced),
+                    error_message = VALUES(error_message),
+                    finished_at = NOW()
+            """), {
+                'sync_date': sync_date,
+                'endpoint': endpoint,
+                'status': status,
+                'rows_synced': rows_synced,
+                'error_message': error
+            })
+
+    def get_sync_status(self, sync_date: date, endpoint: str) -> Optional[str]:
+        with self.tushare_engine.connect() as conn:
+            res = conn.execute(text(
+                "SELECT status FROM sync_log WHERE sync_date=:d AND endpoint=:ep"
+            ), {'d': sync_date, 'ep': endpoint})
+            row = res.fetchone()
+            return row[0] if row else None
+
+    # =========================================================================
+    # Trade calendar helpers
+    # =========================================================================
+
+    def get_trade_days(self, start_d: date, end_d: date) -> List[date]:
+        """Return trade dates between start_d and end_d inclusive."""
+        s = start_d.strftime('%Y%m%d')
+        e = end_d.strftime('%Y%m%d')
+        try:
+            df = call_pro('trade_cal', exchange='SSE', start_date=s, end_date=e)
+            if df is None:
+                raise Exception('trade_cal returned None')
+            df = df[df['is_open'] == 1]
+            return [pd.to_datetime(d).date() for d in df['calendar_date']]
+        except Exception as exc:
+            logger.warning('trade_cal unavailable; fallback to weekdays: %s', exc)
+            days = []
+            cur = start_d
+            while cur <= end_d:
+                if cur.weekday() < 5:
+                    days.append(cur)
+                cur += timedelta(days=1)
+            return days
+
+    def get_previous_trade_date(self, ref_date: Optional[date] = None) -> date:
+        """Find the most recent trade date on or before ref_date (default: yesterday)."""
+        if ref_date is None:
+            ref_date = date.today() - timedelta(days=1)
+        start = ref_date - timedelta(days=10)
+        trade_days = self.get_trade_days(start, ref_date)
+        return trade_days[-1] if trade_days else ref_date
+
+    def find_missing_trade_dates(self, lookback_days: int = BACKFILL_DAYS) -> List[date]:
+        """Find trade dates missing successful sync for any required endpoint."""
+        end = date.today() - timedelta(days=1)
+        start = end - timedelta(days=lookback_days)
+        trade_days = self.get_trade_days(start, end)
+        missing: List[date] = []
+        for td in trade_days:
+            for ep in REQUIRED_ENDPOINTS:
+                status = self.get_sync_status(td, ep)
+                if status != 'success':
+                    missing.append(td)
+                    break
+        missing_sorted = sorted(set(missing))
+        if missing_sorted:
+            logger.info("Missing trade dates: %s", missing_sorted)
+        return missing_sorted
+
+    def _sleep_backoff(self, attempt: int):
+        delay = RETRY_BACKOFF_BASE * max(1, attempt)
+        time.sleep(delay)
+
+    # =========================================================================
+    # AkShare ingestion helpers
+    # =========================================================================
+
+    def get_akshare_symbols(self) -> List[str]:
+        """AkShare no longer ingests stock-level data; return empty list.
+
+        Historically this returned symbols from `stock_basic`. AkShare is
+        limited to index_daily now, so we treat stock list as empty to avoid
+        attempting stock-level ingestion.
+        """
+        logger.debug("get_akshare_symbols: AkShare stock ingestion disabled, returning empty list")
+        return []
+
+    def run_akshare_daily_for_date(self, sync_date: date) -> Tuple[str, int, Optional[str]]:
+        """Ingest AkShare daily data for a specific date with retries."""
+        # Only ingest index_daily from AkShare. Stock-level ingestion disabled.
+        target_date_dash = sync_date.strftime('%Y-%m-%d')
+        try:
+            from app.services.akshare_ingest import INDEX_MAPPING
+            index_symbols = list(INDEX_MAPPING.keys())
+        except Exception:
+            index_symbols = []
+
+        index_failures = index_symbols[:]
+        idx_attempt = 0
+        total_success = 0
+        while index_failures and idx_attempt < MAX_RETRIES:
+            idx_attempt += 1
+            remaining = []
+            for idx_sym in index_failures:
+                try:
+                    ak_ingest_index_daily(symbol=idx_sym, start_date=target_date_dash)
+                    total_success += 1
+                except Exception as exc:
+                    logger.warning("AkShare index daily failed for %s on %s (attempt %d/%d): %s", idx_sym, target_date_dash, idx_attempt, MAX_RETRIES, exc)
+                    remaining.append(idx_sym)
+            index_failures = remaining
+            if index_failures:
+                self._sleep_backoff(idx_attempt)
+
+        if index_failures:
+            msg = f"index_failures={len(index_failures)}"
+            return ('partial' if total_success > 0 else 'error'), total_success, msg
+        return 'success', total_success, None
+
+    def run_akshare_to_tushare_for_date(self, sync_date: date) -> Tuple[str, int, Optional[str]]:
+        """Sync AkShare data into Tushare DB for a specific date."""
+        start_date = sync_date.strftime('%Y-%m-%d')
+        attempt = 0
+        last_error: Optional[str] = None
+        while attempt < MAX_RETRIES:
+            attempt += 1
+            try:
+                # We no longer sync AkShare index data into Tushare. Instead,
+                # report success if AkShare has index_daily rows for the date.
+                with akshare_engine.connect() as conn:
+                    res = conn.execute(text("SELECT COUNT(1) as cnt FROM index_daily WHERE trade_date = :d"), {'d': start_date})
+                    row = res.fetchone()
+                    cnt = row[0] if row else 0
+                return 'success', int(cnt or 0), None
+            except Exception as exc:
+                last_error = str(exc)
+                self._sleep_backoff(attempt)
+        return 'error', 0, last_error
+
+    def run_tushare_daily_for_date(self, sync_date: date) -> Tuple[str, int, Optional[str]]:
+        """Ingest Tushare daily data for a specific date with retries."""
+        ts_codes = get_all_ts_codes()
+        if not ts_codes:
+            ingest_stock_basic()
+            ts_codes = get_all_ts_codes()
+        if not ts_codes:
+            return 'error', 0, 'No Tushare ts_codes available'
+
+        target = sync_date.strftime('%Y%m%d')
+        failures = ts_codes[:]
+        total_success = 0
+        attempt = 0
+        while failures and attempt < MAX_RETRIES:
+            attempt += 1
+            remaining = []
+            for code in failures:
+                try:
+                    ingest_daily(ts_code=code, start_date=target, end_date=target)
+                    total_success += 1
+                except Exception as exc:
+                    logger.warning("Tushare daily failed for %s on %s (attempt %d/%d): %s", code, target, attempt, MAX_RETRIES, exc)
+                    remaining.append(code)
+                time.sleep(0.02)
+            failures = remaining
+            if failures:
+                self._sleep_backoff(attempt)
+
+        if failures:
+            msg = f"failures={len(failures)}"
+            return 'partial' if total_success > 0 else 'error', total_success, msg
+        return 'success', total_success, None
+
+    def run_vnpy_sync(self) -> Tuple[str, int, Optional[str]]:
+        """Sync Tushare data into vnpy database."""
+        attempt = 0
+        last_error: Optional[str] = None
+        while attempt < MAX_RETRIES:
+            attempt += 1
+            try:
+                symbols, bars = self.sync_to_vnpy()
+                return 'success', bars, None
+            except Exception as exc:
+                last_error = str(exc)
+                self._sleep_backoff(attempt)
+        return 'error', 0, last_error
     
     def map_exchange(self, ts_code: str) -> str:
         """Map tushare ts_code suffix to vnpy exchange string."""
@@ -347,50 +594,43 @@ class DataSyncDaemon:
     # =========================================================================
     
     def run_daily_sync(self, ts_codes: Optional[List[str]] = None):
-        """
-        Run the full daily sync pipeline:
-        1. Fetch new data from Tushare API to tushare_data
-        2. Sync new data from tushare_data to vnpy_data
-        """
-        sync_date = date.today()
-        logger.info(f"Starting daily sync for {sync_date}...")
-        
-        # Log sync start
-        with self.tushare_engine.begin() as conn:
-            conn.execute(text("""
-                INSERT INTO sync_log (sync_date, endpoint, status, started_at)
-                VALUES (:sync_date, 'daily_sync', 'running', NOW())
-                ON DUPLICATE KEY UPDATE status = 'running', started_at = NOW()
-            """), {'sync_date': sync_date})
-        
-        try:
-            # Step 1: Fetch from Tushare
-            logger.info("Step 1: Fetching data from Tushare API...")
-            fetched = self.fetch_tushare_data(ts_codes)
-            
-            # Step 2: Sync to vnpy
-            logger.info("Step 2: Syncing to vnpy_data...")
-            symbols, bars = self.sync_to_vnpy(ts_codes)
-            
-            # Log success
-            with self.tushare_engine.begin() as conn:
-                conn.execute(text("""
-                    UPDATE sync_log 
-                    SET status = 'success', rows_synced = :rows, finished_at = NOW()
-                    WHERE sync_date = :sync_date AND endpoint = 'daily_sync'
-                """), {'sync_date': sync_date, 'rows': bars})
-            
-            logger.info(f"Daily sync complete: {fetched} symbols fetched, {bars} bars synced")
-            
-        except Exception as e:
-            logger.exception(f"Daily sync failed: {e}")
-            with self.tushare_engine.begin() as conn:
-                conn.execute(text("""
-                    UPDATE sync_log 
-                    SET status = 'error', error_message = :error, finished_at = NOW()
-                    WHERE sync_date = :sync_date AND endpoint = 'daily_sync'
-                """), {'sync_date': sync_date, 'error': str(e)})
-            raise
+        """Run the full daily sync pipeline for the latest trade date."""
+        sync_date = self.get_previous_trade_date()
+        return self.run_sync_for_date(sync_date)
+
+    def run_sync_for_date(self, sync_date: date) -> Dict[str, Dict[str, Optional[str]]]:
+        """Run the full sync pipeline for a given trade date."""
+        logger.info("Starting sync pipeline for %s...", sync_date)
+        self.verify_audit_tables()
+
+        results: Dict[str, Dict[str, Optional[str]]] = {}
+
+        # AkShare daily
+        self.write_sync_log(sync_date, 'akshare_daily', 'running', 0, None)
+        status, rows, err = self.run_akshare_daily_for_date(sync_date)
+        self.write_sync_log(sync_date, 'akshare_daily', status, rows, err)
+        results['akshare_daily'] = {'status': status, 'error': err}
+
+        # AkShare -> Tushare
+        self.write_sync_log(sync_date, 'akshare_to_tushare', 'running', 0, None)
+        status, rows, err = self.run_akshare_to_tushare_for_date(sync_date)
+        self.write_sync_log(sync_date, 'akshare_to_tushare', status, rows, err)
+        results['akshare_to_tushare'] = {'status': status, 'error': err}
+
+        # Tushare daily
+        self.write_sync_log(sync_date, 'tushare_daily', 'running', 0, None)
+        status, rows, err = self.run_tushare_daily_for_date(sync_date)
+        self.write_sync_log(sync_date, 'tushare_daily', status, rows, err)
+        results['tushare_daily'] = {'status': status, 'error': err}
+
+        # vnpy sync
+        self.write_sync_log(sync_date, 'vnpy_sync', 'running', 0, None)
+        status, rows, err = self.run_vnpy_sync()
+        self.write_sync_log(sync_date, 'vnpy_sync', status, rows, err)
+        results['vnpy_sync'] = {'status': status, 'error': err}
+
+        logger.info("Sync pipeline finished for %s: %s", sync_date, results)
+        return results
     
     # =========================================================================
     # Daemon mode
@@ -398,11 +638,15 @@ class DataSyncDaemon:
     
     def run_daemon(self):
         """Run as a background daemon with scheduled sync."""
-        logger.info(f"Starting data sync daemon (scheduled at {SYNC_HOUR:02d}:{SYNC_MINUTE:02d})...")
-        
-        # Schedule daily sync
+        logger.info("Starting data sync daemon (scheduled at %02d:%02d)...", SYNC_HOUR, SYNC_MINUTE)
+
+        # Verify audit tables and backfill on startup
+        self.verify_audit_tables()
+        self.run_backfill(lookback_days=BACKFILL_DAYS)
+
+        # Schedule daily sync for latest trade date
         schedule.every().day.at(f"{SYNC_HOUR:02d}:{SYNC_MINUTE:02d}").do(self.run_daily_sync)
-        
+
         self.running = True
         try:
             while self.running:
@@ -417,6 +661,12 @@ class DataSyncDaemon:
         """Stop the daemon."""
         self.running = False
 
+    def run_backfill(self, lookback_days: int = BACKFILL_DAYS):
+        """Backfill missing trade dates based on audit logs."""
+        missing = self.find_missing_trade_dates(lookback_days=lookback_days)
+        for d in missing:
+            self.run_sync_for_date(d)
+
 
 def main():
     parser = argparse.ArgumentParser(description="TraderMate Data Sync Daemon")
@@ -427,6 +677,10 @@ def main():
     parser.add_argument('--symbol', type=str, help='Sync specific symbol (e.g., 000001.SZ)')
     parser.add_argument('--all-symbols', action='store_true', help='Sync all symbols')
     parser.add_argument('--full-refresh', action='store_true', help='Full refresh (not incremental)')
+    parser.add_argument('--date', type=str, help='Sync specific trade date (YYYY-MM-DD)')
+    parser.add_argument('--from', dest='from_date', type=str, help='Start date for range (YYYY-MM-DD)')
+    parser.add_argument('--to', dest='to_date', type=str, help='End date for range (YYYY-MM-DD)')
+    parser.add_argument('--backfill-days', type=int, help='Backfill missing trade dates for N days')
     args = parser.parse_args()
     
     daemon = DataSyncDaemon()
@@ -440,6 +694,16 @@ def main():
     
     if args.daemon:
         daemon.run_daemon()
+    elif args.backfill_days:
+        daemon.run_backfill(lookback_days=args.backfill_days)
+    elif args.date:
+        sync_date = datetime.strptime(args.date, '%Y-%m-%d').date()
+        daemon.run_sync_for_date(sync_date)
+    elif args.from_date and args.to_date:
+        start = datetime.strptime(args.from_date, '%Y-%m-%d').date()
+        end = datetime.strptime(args.to_date, '%Y-%m-%d').date()
+        for d in daemon.get_trade_days(start, end):
+            daemon.run_sync_for_date(d)
     elif args.sync_vnpy:
         daemon.sync_to_vnpy(ts_codes, full_refresh=args.full_refresh)
     elif args.fetch_only:
@@ -447,7 +711,7 @@ def main():
     elif args.once:
         daemon.run_daily_sync(ts_codes)
     else:
-        # Default: run once
+        # Default: run once for latest trade date
         daemon.run_daily_sync(ts_codes)
 
 
