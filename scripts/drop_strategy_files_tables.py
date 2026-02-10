@@ -2,7 +2,7 @@
 """Drop obsolete strategy_files and strategy_file_history tables.
 
 After removing file-based strategy functionality, these tables are no longer needed.
-Strategy code is now stored exclusively in strategies.code and strategy_code_history.
+Strategy code is now stored exclusively in strategies.code and strategy_history.
 """
 import sys
 from pathlib import Path
@@ -56,7 +56,7 @@ def main():
         print("=" * 80)
         print("\nStrategy data is now stored exclusively in:")
         print("  - strategies.code (current version)")
-        print("  - strategy_code_history (historical snapshots)")
+        print("  - strategy_history (historical snapshots)")
         
     except Exception as e:
         print(f"\n❌ Migration failed: {e}")

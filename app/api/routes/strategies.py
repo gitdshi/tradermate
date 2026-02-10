@@ -181,7 +181,7 @@ async def update_strategy(
     try:
         # Check if strategy exists
         result = conn.execute(
-            text("SELECT id, code, class_name FROM strategies WHERE id = :strategy_id AND user_id = :user_id"),
+            text("SELECT id, code, class_name, name, version, parameters FROM strategies WHERE id = :strategy_id AND user_id = :user_id"),
             {"strategy_id": strategy_id, "user_id": current_user.user_id}
         )
         existing = result.fetchone()
@@ -210,43 +210,49 @@ async def update_strategy(
                     detail=f"Invalid strategy code: {'; '.join(validation.errors)}"
                 )
 
-        # If code provided, save previous code into history (keep last 5)
-        if strategy_data.code is not None:
+        # Determine if a substantive change requires version bump and history save.
+        # Bump on changes to name, class_name, description, parameters or code.
+        version_bump = False
+
+        # Compare provided values to existing to avoid unnecessary bumps
+        if strategy_data.name is not None and strategy_data.name != existing.name:
+            version_bump = True
+        if strategy_data.description is not None and strategy_data.description != getattr(existing, 'description', None):
+            version_bump = True
+        if strategy_data.class_name is not None and strategy_data.class_name != existing.class_name:
+            version_bump = True
+        if strategy_data.parameters is not None:
+            import json as _json
             try:
-                conn2 = get_db_connection()
-                prev_code = existing.code
-                now = datetime.utcnow()
-                conn2.execute(text("INSERT INTO strategy_code_history (strategy_id, code, created_at) VALUES (:sid, :code, :created_at)"), {"sid": strategy_id, "code": prev_code, "created_at": now})
-                conn2.commit()
-                # rotate to last 5
-                rows = conn2.execute(text("SELECT id FROM strategy_code_history WHERE strategy_id = :sid ORDER BY created_at DESC"), {"sid": strategy_id}).fetchall()
-                keep = [r.id for r in rows[:5]]
-                if keep:
-                    params = {"sid": strategy_id}
-                    for i, v in enumerate(keep):
-                        params[f"k{i}"] = v
-                    conn2.execute(text(f"DELETE FROM strategy_code_history WHERE strategy_id = :sid AND id NOT IN ({','.join([':k'+str(i) for i in range(len(keep))])})"), params)
-                    conn2.commit()
+                existing_params = existing.parameters
+                # existing.parameters may already be a JSON string
+                if isinstance(existing_params, str):
+                    existing_parsed = _json.loads(existing_params) if existing_params else {}
+                else:
+                    existing_parsed = existing_params or {}
             except Exception:
-                try:
-                    conn2.close()
-                except Exception:
-                    pass
+                existing_parsed = {}
+            try:
+                # normalize both to JSON strings for comparison
+                new_params_json = _json.dumps(strategy_data.parameters, sort_keys=True)
+                existing_params_json = _json.dumps(existing_parsed, sort_keys=True)
+                if new_params_json != existing_params_json:
+                    version_bump = True
+            except Exception:
+                version_bump = True
+        if strategy_data.code is not None and strategy_data.code != existing.code:
+            version_bump = True
         
         # Build update query
         updates = []
         params = {"strategy_id": strategy_id, "user_id": current_user.user_id}
-        
-        # Track whether a substantive change requires version bump
-        version_bump = False
-        
+
         if strategy_data.name is not None:
             updates.append("name = :name")
             params["name"] = strategy_data.name
         if strategy_data.class_name is not None:
             updates.append("class_name = :class_name")
             params["class_name"] = strategy_data.class_name
-            version_bump = True
         if strategy_data.description is not None:
             updates.append("description = :description")
             params["description"] = strategy_data.description
@@ -254,18 +260,50 @@ async def update_strategy(
             import json
             updates.append("parameters = :parameters")
             params["parameters"] = json.dumps(strategy_data.parameters)
-            version_bump = True
         if strategy_data.code is not None:
             updates.append("code = :code")
             params["code"] = strategy_data.code
-            version_bump = True
         if strategy_data.is_active is not None:
             updates.append("is_active = :is_active")
             params["is_active"] = strategy_data.is_active
-        
-        # Auto-increment version when code, parameters, or class_name changes
+
+        # Auto-increment version when substantive change detected
         if version_bump:
             updates.append("version = version + 1")
+
+            # Save current state into strategy_history before applying update
+            try:
+                conn2 = get_db_connection()
+                prev_code = existing.code
+                now = datetime.utcnow()
+                import json as _json
+                prev_params = existing.parameters
+                try:
+                    if isinstance(prev_params, str):
+                        params_json = prev_params
+                    else:
+                        params_json = _json.dumps(prev_params) if prev_params is not None else '{}'
+                except Exception:
+                    params_json = '{}'
+
+                conn2.execute(text(
+                    "INSERT INTO strategy_history (strategy_id, strategy_name, class_name, description, version, parameters, code, created_at) VALUES (:sid, :sname, :class, :description, :version, :parameters, :code, :created_at)"
+                ), {"sid": strategy_id, "sname": existing.name, "class": existing.class_name, "description": getattr(existing, 'description', None), "version": existing.version, "parameters": params_json, "code": prev_code, "created_at": now})
+                conn2.commit()
+                # rotate to last 5
+                rows = conn2.execute(text("SELECT id FROM strategy_history WHERE strategy_id = :sid ORDER BY created_at DESC"), {"sid": strategy_id}).fetchall()
+                keep = [r.id for r in rows[:5]]
+                if keep:
+                    params_keep = {"sid": strategy_id}
+                    for i, v in enumerate(keep):
+                        params_keep[f"k{i}"] = v
+                    conn2.execute(text(f"DELETE FROM strategy_history WHERE strategy_id = :sid AND id NOT IN ({','.join([':k'+str(i) for i in range(len(keep))])})"), params_keep)
+                    conn2.commit()
+            except Exception:
+                try:
+                    conn2.close()
+                except Exception:
+                    pass
         
         updates.append("updated_at = :updated_at")
         params["updated_at"] = datetime.utcnow()
@@ -344,10 +382,19 @@ async def list_strategy_code_history(
         if not owner_check:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Strategy not found")
 
-        rows = conn.execute(text("SELECT id, created_at, LENGTH(code) as size FROM strategy_code_history WHERE strategy_id = :sid ORDER BY created_at DESC"), {"sid": strategy_id}).fetchall()
+        rows = conn.execute(text("SELECT id, created_at, LENGTH(code) as size, strategy_name, class_name, description, version, parameters FROM strategy_history WHERE strategy_id = :sid ORDER BY created_at DESC"), {"sid": strategy_id}).fetchall()
         out = []
         for r in rows:
-            out.append({"id": r.id, "created_at": r.created_at.isoformat() if hasattr(r.created_at, 'isoformat') else str(r.created_at), "size": int(r.size)})
+            out.append({
+                "id": r.id,
+                "created_at": r.created_at.isoformat() if hasattr(r.created_at, 'isoformat') else str(r.created_at),
+                "size": int(r.size),
+                "strategy_name": getattr(r, 'strategy_name', None),
+                "class_name": getattr(r, 'class_name', None),
+                "description": getattr(r, 'description', None),
+                "version": getattr(r, 'version', None),
+                "parameters": getattr(r, 'parameters', None),
+            })
         return out
     finally:
         conn.close()
@@ -370,10 +417,10 @@ async def get_strategy_code_history(
         if not owner_check:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Strategy not found")
 
-        row = conn.execute(text("SELECT code FROM strategy_code_history WHERE id = :hid AND strategy_id = :sid"), {"hid": history_id, "sid": strategy_id}).fetchone()
+        row = conn.execute(text("SELECT id, code, strategy_name, class_name, description, version, parameters FROM strategy_history WHERE id = :hid AND strategy_id = :sid"), {"hid": history_id, "sid": strategy_id}).fetchone()
         if not row:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="History not found")
-        return {"id": history_id, "code": row.code}
+        return {"id": history_id, "code": row.code, "strategy_name": getattr(row, 'strategy_name', None), "class_name": getattr(row, 'class_name', None), "description": getattr(row, 'description', None), "version": getattr(row, 'version', None), "parameters": getattr(row, 'parameters', None)}
     finally:
         conn.close()
 
@@ -389,7 +436,7 @@ async def restore_strategy_code_history(
     try:
         # Ensure strategy belongs to current user
         owner_check = conn.execute(
-            text("SELECT id, code FROM strategies WHERE id = :sid AND user_id = :user_id"),
+            text("SELECT id, code, name, class_name, description, version, parameters FROM strategies WHERE id = :sid AND user_id = :user_id"),
             {"sid": strategy_id, "user_id": current_user.user_id}
         ).fetchone()
         if not owner_check:
@@ -397,25 +444,64 @@ async def restore_strategy_code_history(
 
         # Get the history code
         history_row = conn.execute(
-            text("SELECT code FROM strategy_code_history WHERE id = :hid AND strategy_id = :sid"),
+            text("SELECT code, strategy_name, class_name, description, version, parameters FROM strategy_history WHERE id = :hid AND strategy_id = :sid"),
             {"hid": history_id, "sid": strategy_id}
         ).fetchone()
         if not history_row:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="History not found")
 
-        # Save current code to history before restoring
+        # Save current code and metadata to history before restoring
         current_code = owner_check.code
         if current_code:
             now = datetime.utcnow()
+            import json as _json
+            prev_params = owner_check.parameters
+            try:
+                if isinstance(prev_params, str):
+                    params_json = prev_params
+                else:
+                    params_json = _json.dumps(prev_params) if prev_params is not None else '{}'
+            except Exception:
+                params_json = '{}'
+
             conn.execute(
-                text("INSERT INTO strategy_code_history (strategy_id, code, created_at) VALUES (:sid, :code, :created_at)"),
-                {"sid": strategy_id, "code": current_code, "created_at": now}
+                text("INSERT INTO strategy_history (strategy_id, strategy_name, class_name, description, version, parameters, code, created_at) VALUES (:sid, :sname, :class, :description, :version, :parameters, :code, :created_at)"),
+                {"sid": strategy_id, "sname": owner_check.name, "class": owner_check.class_name, "description": getattr(owner_check, 'description', None), "version": owner_check.version, "parameters": params_json, "code": current_code, "created_at": now}
             )
 
-        # Restore the history code to the strategy
+        # Restore the history metadata and code to the strategy (name, class, description, parameters, code)
+        import json as _json
+        hist_params = history_row.parameters
+        try:
+            if isinstance(hist_params, str):
+                params_val = hist_params
+            else:
+                params_val = _json.dumps(hist_params) if hist_params is not None else None
+        except Exception:
+            params_val = None
+
         conn.execute(
-            text("UPDATE strategies SET code = :code, version = version + 1, updated_at = :updated_at WHERE id = :sid"),
-            {"code": history_row.code, "updated_at": datetime.utcnow(), "sid": strategy_id}
+            text("""
+                UPDATE strategies SET
+                  name = :name,
+                  class_name = :class_name,
+                  description = :description,
+                  parameters = :parameters,
+                  code = :code,
+                  version = version + 1,
+                  updated_at = :updated_at
+                WHERE id = :sid
+            """),
+            {
+                # Apply history values verbatim; allow NULL/blank to overwrite current values
+                "name": getattr(history_row, 'strategy_name', None),
+                "class_name": getattr(history_row, 'class_name', None),
+                "description": getattr(history_row, 'description', None),
+                "parameters": params_val,
+                "code": history_row.code,
+                "updated_at": datetime.utcnow(),
+                "sid": strategy_id
+            }
         )
         conn.commit()
 

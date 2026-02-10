@@ -119,17 +119,61 @@ def init_db():
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """))
 
-        # Strategy code history - stores historical snapshots of DB strategy code
+        # Strategy history - stores historical snapshots of DB strategy code
+        # If the old table `strategy_code_history` exists, migrate it by renaming
+        try:
+            exists_old = conn.execute(text("""
+                SELECT TABLE_NAME FROM information_schema.TABLES
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'strategy_code_history'
+            """)).fetchone()
+            exists_new = conn.execute(text("""
+                SELECT TABLE_NAME FROM information_schema.TABLES
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'strategy_history'
+            """)).fetchone()
+
+            if exists_old and not exists_new:
+                # Rename old table to new name to preserve history
+                conn.execute(text("RENAME TABLE strategy_code_history TO strategy_history"))
+                print("Renamed strategy_code_history to strategy_history")
+        except Exception:
+            # ignore rename failures here; creation below will ensure the new table exists
+            pass
+
         conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS strategy_code_history (
+            CREATE TABLE IF NOT EXISTS strategy_history (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 strategy_id INT NOT NULL,
+                strategy_name VARCHAR(200),
+                class_name VARCHAR(200),
+                description TEXT,
+                version INT,
+                parameters JSON,
                 code LONGTEXT,
                 created_at DATETIME NOT NULL,
                 FOREIGN KEY (strategy_id) REFERENCES strategies(id) ON DELETE CASCADE,
                 INDEX idx_strategy_id (strategy_id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """))
+        # Ensure any missing columns are added to existing table (migration-safe)
+        try:
+            cols = [
+                ("strategy_name", "VARCHAR(200)"),
+                ("class_name", "VARCHAR(200)"),
+                ("description", "TEXT"),
+                ("version", "INT"),
+                ("parameters", "JSON"),
+            ]
+            for col_name, col_def in cols:
+                exists = conn.execute(text("""
+                    SELECT COLUMN_NAME FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'strategy_history' AND COLUMN_NAME = :col
+                """), {"col": col_name}).fetchone()
+                if not exists:
+                    conn.execute(text(f"ALTER TABLE strategy_history ADD COLUMN {col_name} {col_def}"))
+                    print(f"Added missing column {col_name} to strategy_history")
+        except Exception:
+            # best-effort migration; ignore errors
+            pass
         
         conn.commit()
         print("Database tables initialized successfully")

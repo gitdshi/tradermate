@@ -144,12 +144,15 @@ CREATE TABLE IF NOT EXISTS optimization_results (
     INDEX idx_status (status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Strategy optimization results';
 
--- -----------------------------------------------------------------------------
--- Strategy code history - stores historical snapshots of strategy code
--- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS strategy_code_history (
+-- Strategy history - stores historical snapshots of strategy code
+CREATE TABLE IF NOT EXISTS strategy_history (
     id INT AUTO_INCREMENT PRIMARY KEY,
     strategy_id INT NOT NULL,
+    strategy_name VARCHAR(200),
+    class_name VARCHAR(200),
+    description TEXT,
+    version INT,
+    parameters JSON,
     code LONGTEXT,
     created_at DATETIME NOT NULL,
     FOREIGN KEY (strategy_id) REFERENCES strategies(id) ON DELETE CASCADE,
