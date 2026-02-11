@@ -33,10 +33,10 @@ except Exception as e:
 
 # Test submit_backtest
 try:
-    from app.api.services.backtest_service_v2 import get_backtest_service_v2
+    from app.api.services.backtest_service import get_backtest_service
     from datetime import date
     
-    service = get_backtest_service_v2()
+    service = get_backtest_service()
     print('Service created')
     
     # Get strategy info

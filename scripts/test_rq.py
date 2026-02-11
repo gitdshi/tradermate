@@ -8,7 +8,7 @@ from datetime import date
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from app.api.services.backtest_service_v2 import get_backtest_service_v2
+from app.api.services.backtest_service import get_backtest_service
 from app.api.services.job_storage import get_job_storage
 import time
 
@@ -18,7 +18,7 @@ def test_job_submission():
     print("Testing RQ Integration")
     print("=" * 60)
     
-    service = get_backtest_service_v2()
+    service = get_backtest_service()
     
     # Submit a test backtest
     print("\n1. Submitting backtest job...")

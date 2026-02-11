@@ -5,7 +5,7 @@ from sqlalchemy import text
 
 from app.api.middleware.auth import get_current_user
 from app.api.models.user import TokenData
-from app.api.services.backtest_service_v2 import get_backtest_service_v2
+from app.api.services.backtest_service import get_backtest_service
 from app.api.services.job_storage import get_job_storage
 
 router = APIRouter(prefix="/queue", tags=["queue"])
@@ -32,7 +32,7 @@ async def list_jobs(
     current_user: TokenData = Depends(get_current_user)
 ) -> List[Dict[str, Any]]:
     """List user's jobs, enriched with bulk metrics from DB."""
-    service = get_backtest_service_v2()
+    service = get_backtest_service()
     jobs = service.list_user_jobs(
         user_id=current_user.user_id,
         status=status,
@@ -105,7 +105,7 @@ async def get_job_detail(
     current_user: TokenData = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Get job details and result."""
-    service = get_backtest_service_v2()
+    service = get_backtest_service()
     job = service.get_job_status(job_id, current_user.user_id)
     
     if not job:
@@ -120,7 +120,7 @@ async def cancel_job(
     current_user: TokenData = Depends(get_current_user)
 ):
     """Cancel a running job."""
-    service = get_backtest_service_v2()
+    service = get_backtest_service()
     success = service.cancel_job(job_id, current_user.user_id)
     
     if not success:
@@ -139,7 +139,7 @@ async def delete_job(
 ):
     """Delete a job and its results. For bulk jobs, cascade-deletes all children."""
     # First check if user owns the job
-    service = get_backtest_service_v2()
+    service = get_backtest_service()
     job = service.get_job_status(job_id, current_user.user_id)
     
     if not job:
@@ -196,7 +196,7 @@ async def submit_backtest_to_queue(
     """Submit a backtest job to RQ queue for async processing."""
     from datetime import datetime as dt
     
-    service = get_backtest_service_v2()
+    service = get_backtest_service()
     
     # Parse dates
     start_date = dt.strptime(request["start_date"], "%Y-%m-%d").date()
@@ -239,7 +239,7 @@ async def submit_bulk_backtest(
     """Submit a bulk backtest job – one strategy against multiple symbols."""
     from datetime import datetime as dt
 
-    service = get_backtest_service_v2()
+    service = get_backtest_service()
 
     symbols = request.get("symbols")
     if not symbols or not isinstance(symbols, list) or len(symbols) == 0:
