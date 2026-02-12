@@ -6,7 +6,7 @@ Usage:
 import json
 from app.infrastructure.db.connections import get_tradermate_connection
 from sqlalchemy import text
-from app.api.worker.tasks import resolve_symbol_name
+from app.worker.tasks import resolve_symbol_name
 
 
 def backfill_children(conn):

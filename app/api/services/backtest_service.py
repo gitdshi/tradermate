@@ -21,8 +21,8 @@ from vnpy.trader.constant import Interval
 from vnpy_ctastrategy.backtesting import BacktestingEngine, BacktestingMode
 
 from app.api.models.backtest import BacktestResult, BacktestStatus
-from app.api.worker.config import get_queue
-from app.api.worker.tasks import (
+from app.worker.config import get_queue
+from app.worker.tasks import (
     run_backtest_task,
     run_bulk_backtest_task,
     run_optimization_task,

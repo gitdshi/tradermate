@@ -17,7 +17,7 @@ from app.api.models.backtest import (
 )
 from app.api.services.auth_service import get_current_user
 from app.api.services.backtest_service import BacktestService
-from app.api.worker.tasks import save_backtest_to_db
+from app.worker.tasks import save_backtest_to_db
 from app.api.services.job_storage_service import get_job_storage
 
 from app.domains.backtests.dao.backtest_history_dao import BacktestHistoryDao

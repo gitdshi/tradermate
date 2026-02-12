@@ -128,7 +128,7 @@ class JobStorage:
         return deleted
     
     def get_queue_stats(self) -> Dict[str, Any]:
-        from app.api.worker.config import QUEUES
+        from app.worker.config import QUEUES
         stats = {}
         for name, queue in QUEUES.items():
             stats[name] = {
