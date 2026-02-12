@@ -2,7 +2,6 @@
 from datetime import datetime
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import text
 
 from app.api.models.user import TokenData
 from app.api.models.strategy import (
@@ -13,8 +12,9 @@ from app.api.models.strategy import (
     StrategyValidation,
 )
 from app.api.middleware.auth import get_current_user
-from app.api.services.db import get_db_connection
 from app.api.services.strategy_service import validate_strategy_code
+
+from app.domains.strategies.service import StrategiesService
 
 router = APIRouter(prefix="/strategies", tags=["Strategies"])
 
@@ -22,35 +22,21 @@ router = APIRouter(prefix="/strategies", tags=["Strategies"])
 @router.get("", response_model=List[StrategyListItem])
 async def list_strategies(current_user: TokenData = Depends(get_current_user)):
     """List all strategies for current user."""
-    conn = get_db_connection()
-    
-    try:
-        result = conn.execute(
-            text("""
-                SELECT id, name, class_name, description, version, is_active, created_at, updated_at
-                FROM strategies
-                WHERE user_id = :user_id
-                ORDER BY updated_at DESC
-            """),
-            {"user_id": current_user.user_id}
+    service = StrategiesService()
+    rows = service.list_strategies(current_user.user_id)
+    return [
+        StrategyListItem(
+            id=r["id"],
+            name=r["name"],
+            class_name=r.get("class_name"),
+            description=r.get("description"),
+            version=r.get("version"),
+            is_active=r.get("is_active"),
+            created_at=r.get("created_at"),
+            updated_at=r.get("updated_at"),
         )
-        rows = result.fetchall()
-        
-        return [
-            StrategyListItem(
-                id=row.id,
-                name=row.name,
-                class_name=row.class_name,
-                description=row.description,
-                version=row.version,
-                is_active=row.is_active,
-                created_at=row.created_at,
-                updated_at=row.updated_at
-            )
-            for row in rows
-        ]
-    finally:
-        conn.close()
+        for r in rows
+    ]
 
 
 @router.post("", response_model=Strategy, status_code=status.HTTP_201_CREATED)
@@ -59,71 +45,32 @@ async def create_strategy(
     current_user: TokenData = Depends(get_current_user)
 ):
     """Create a new strategy."""
-    # Validate strategy code only if provided
-    if strategy_data.code:
-        validation = validate_strategy_code(strategy_data.code, strategy_data.class_name)
-        if not validation.valid:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid strategy code: {'; '.join(validation.errors)}"
-            )
-    
-    conn = get_db_connection()
-    
+    service = StrategiesService()
     try:
-        # Debug logging for create attempts
-        print(f"[create_strategy] user_id={current_user.user_id} name={strategy_data.name} class_name={strategy_data.class_name}")
-        now = datetime.utcnow()
-        
-        # Check if strategy name exists for this user
-        result = conn.execute(
-            text("SELECT id FROM strategies WHERE user_id = :user_id AND name = :name"),
-            {"user_id": current_user.user_id, "name": strategy_data.name}
-        )
-        if result.fetchone():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Strategy with this name already exists"
-            )
-        
-        # Insert strategy
-        import json
-        result = conn.execute(
-            text("""
-                INSERT INTO strategies (user_id, name, class_name, description, parameters, code, version, is_active, created_at, updated_at)
-                VALUES (:user_id, :name, :class_name, :description, :parameters, :code, 1, 1, :created_at, :updated_at)
-            """),
-            {
-                "user_id": current_user.user_id,
-                "name": strategy_data.name,
-                "class_name": strategy_data.class_name,
-                "description": strategy_data.description,
-                "parameters": json.dumps(strategy_data.parameters),
-                "code": strategy_data.code or "",  # Default to empty string if None
-                "created_at": now,
-                "updated_at": now
-            }
-        )
-        conn.commit()
-
-        strategy_id = result.lastrowid
-        print(f"[create_strategy] inserted id={strategy_id} for user_id={current_user.user_id}")
-
-        return Strategy(
-            id=strategy_id,
+        row = service.create_strategy(
             user_id=current_user.user_id,
             name=strategy_data.name,
             class_name=strategy_data.class_name,
             description=strategy_data.description,
-            parameters=strategy_data.parameters,
-            code=strategy_data.code or "",  # Default to empty string if None
-            version=1,
-            is_active=True,
-            created_at=now,
-            updated_at=now
+            parameters=strategy_data.parameters or {},
+            code=strategy_data.code or "",
         )
-    finally:
-        conn.close()
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    return Strategy(
+        id=row["id"],
+        user_id=row["user_id"],
+        name=row["name"],
+        class_name=row.get("class_name"),
+        description=row.get("description"),
+        parameters=row.get("parameters") or {},
+        code=row.get("code") or "",
+        version=row.get("version") or 1,
+        is_active=bool(row.get("is_active")),
+        created_at=row.get("created_at") or datetime.utcnow(),
+        updated_at=row.get("updated_at") or datetime.utcnow(),
+    )
 
 
 @router.get("/{strategy_id}", response_model=Strategy)
@@ -132,41 +79,25 @@ async def get_strategy(
     current_user: TokenData = Depends(get_current_user)
 ):
     """Get a strategy by ID."""
-    conn = get_db_connection()
-    
+    service = StrategiesService()
     try:
-        result = conn.execute(
-            text("""
-                SELECT id, user_id, name, class_name, description, parameters, code, version, is_active, created_at, updated_at
-                FROM strategies
-                WHERE id = :strategy_id AND user_id = :user_id
-            """),
-            {"strategy_id": strategy_id, "user_id": current_user.user_id}
-        )
-        row = result.fetchone()
-        
-        if not row:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Strategy not found"
-            )
-        
-        import json
-        return Strategy(
-            id=row.id,
-            user_id=row.user_id,
-            name=row.name,
-            class_name=row.class_name,
-            description=row.description,
-            parameters=json.loads(row.parameters) if row.parameters else {},
-            code=row.code,
-            version=row.version,
-            is_active=row.is_active,
-            created_at=row.created_at,
-            updated_at=row.updated_at
-        )
-    finally:
-        conn.close()
+        row = service.get_strategy(current_user.user_id, strategy_id)
+    except KeyError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Strategy not found")
+
+    return Strategy(
+        id=row["id"],
+        user_id=row["user_id"],
+        name=row["name"],
+        class_name=row.get("class_name"),
+        description=row.get("description"),
+        parameters=row.get("parameters") or {},
+        code=row.get("code") or "",
+        version=row.get("version") or 1,
+        is_active=bool(row.get("is_active")),
+        created_at=row.get("created_at"),
+        updated_at=row.get("updated_at"),
+    )
 
 
 @router.put("/{strategy_id}", response_model=Strategy)
@@ -176,149 +107,36 @@ async def update_strategy(
     current_user: TokenData = Depends(get_current_user)
 ):
     """Update a strategy."""
-    conn = get_db_connection()
-    
+    service = StrategiesService()
     try:
-        # Check if strategy exists
-        result = conn.execute(
-            text("SELECT id, code, class_name, name, version, parameters FROM strategies WHERE id = :strategy_id AND user_id = :user_id"),
-            {"strategy_id": strategy_id, "user_id": current_user.user_id}
+        row = service.update_strategy(
+            current_user.user_id,
+            strategy_id,
+            name=strategy_data.name,
+            class_name=strategy_data.class_name,
+            description=strategy_data.description,
+            parameters=strategy_data.parameters,
+            code=strategy_data.code,
+            is_active=strategy_data.is_active,
         )
-        existing = result.fetchone()
-        
-        if not existing:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Strategy not found"
-            )
-        
-        # Validate name if provided (must not be empty)
-        if strategy_data.name is not None and not strategy_data.name.strip():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Strategy name cannot be empty"
-            )
-        
-        # Validate code if provided and not empty
-        if strategy_data.code and strategy_data.code.strip():
-            # Use the new class_name if provided, otherwise use existing
-            class_name = strategy_data.class_name if strategy_data.class_name else existing.class_name
-            validation = validate_strategy_code(strategy_data.code, class_name)
-            if not validation.valid:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Invalid strategy code: {'; '.join(validation.errors)}"
-                )
+    except KeyError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Strategy not found")
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
-        # Determine if a substantive change requires version bump and history save.
-        # Bump on changes to name, class_name, description, parameters or code.
-        version_bump = False
-
-        # Compare provided values to existing to avoid unnecessary bumps
-        if strategy_data.name is not None and strategy_data.name != existing.name:
-            version_bump = True
-        if strategy_data.description is not None and strategy_data.description != getattr(existing, 'description', None):
-            version_bump = True
-        if strategy_data.class_name is not None and strategy_data.class_name != existing.class_name:
-            version_bump = True
-        if strategy_data.parameters is not None:
-            import json as _json
-            try:
-                existing_params = existing.parameters
-                # existing.parameters may already be a JSON string
-                if isinstance(existing_params, str):
-                    existing_parsed = _json.loads(existing_params) if existing_params else {}
-                else:
-                    existing_parsed = existing_params or {}
-            except Exception:
-                existing_parsed = {}
-            try:
-                # normalize both to JSON strings for comparison
-                new_params_json = _json.dumps(strategy_data.parameters, sort_keys=True)
-                existing_params_json = _json.dumps(existing_parsed, sort_keys=True)
-                if new_params_json != existing_params_json:
-                    version_bump = True
-            except Exception:
-                version_bump = True
-        if strategy_data.code is not None and strategy_data.code != existing.code:
-            version_bump = True
-        
-        # Build update query
-        updates = []
-        params = {"strategy_id": strategy_id, "user_id": current_user.user_id}
-
-        if strategy_data.name is not None:
-            updates.append("name = :name")
-            params["name"] = strategy_data.name
-        if strategy_data.class_name is not None:
-            updates.append("class_name = :class_name")
-            params["class_name"] = strategy_data.class_name
-        if strategy_data.description is not None:
-            updates.append("description = :description")
-            params["description"] = strategy_data.description
-        if strategy_data.parameters is not None:
-            import json
-            updates.append("parameters = :parameters")
-            params["parameters"] = json.dumps(strategy_data.parameters)
-        if strategy_data.code is not None:
-            updates.append("code = :code")
-            params["code"] = strategy_data.code
-        if strategy_data.is_active is not None:
-            updates.append("is_active = :is_active")
-            params["is_active"] = strategy_data.is_active
-
-        # Auto-increment version when substantive change detected
-        if version_bump:
-            updates.append("version = version + 1")
-
-            # Save current state into strategy_history before applying update
-            try:
-                conn2 = get_db_connection()
-                prev_code = existing.code
-                now = datetime.utcnow()
-                import json as _json
-                prev_params = existing.parameters
-                try:
-                    if isinstance(prev_params, str):
-                        params_json = prev_params
-                    else:
-                        params_json = _json.dumps(prev_params) if prev_params is not None else '{}'
-                except Exception:
-                    params_json = '{}'
-
-                conn2.execute(text(
-                    "INSERT INTO strategy_history (strategy_id, strategy_name, class_name, description, version, parameters, code, created_at) VALUES (:sid, :sname, :class, :description, :version, :parameters, :code, :created_at)"
-                ), {"sid": strategy_id, "sname": existing.name, "class": existing.class_name, "description": getattr(existing, 'description', None), "version": existing.version, "parameters": params_json, "code": prev_code, "created_at": now})
-                conn2.commit()
-                # rotate to last 5
-                rows = conn2.execute(text("SELECT id FROM strategy_history WHERE strategy_id = :sid ORDER BY created_at DESC"), {"sid": strategy_id}).fetchall()
-                keep = [r.id for r in rows[:5]]
-                if keep:
-                    params_keep = {"sid": strategy_id}
-                    for i, v in enumerate(keep):
-                        params_keep[f"k{i}"] = v
-                    conn2.execute(text(f"DELETE FROM strategy_history WHERE strategy_id = :sid AND id NOT IN ({','.join([':k'+str(i) for i in range(len(keep))])})"), params_keep)
-                    conn2.commit()
-            except Exception:
-                try:
-                    conn2.close()
-                except Exception:
-                    pass
-        
-        updates.append("updated_at = :updated_at")
-        params["updated_at"] = datetime.utcnow()
-        
-        if updates:
-            conn.execute(
-                text(f"UPDATE strategies SET {', '.join(updates)} WHERE id = :strategy_id AND user_id = :user_id"),
-                params
-            )
-            conn.commit()
-        
-        # Fetch updated strategy
-        return await get_strategy(strategy_id, current_user)
-    finally:
-        conn.close()
+    return Strategy(
+        id=row["id"],
+        user_id=row["user_id"],
+        name=row["name"],
+        class_name=row.get("class_name"),
+        description=row.get("description"),
+        parameters=row.get("parameters") or {},
+        code=row.get("code") or "",
+        version=row.get("version") or 1,
+        is_active=bool(row.get("is_active")),
+        created_at=row.get("created_at"),
+        updated_at=row.get("updated_at"),
+    )
 
 
 @router.delete("/{strategy_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -327,33 +145,11 @@ async def delete_strategy(
     current_user: TokenData = Depends(get_current_user)
 ):
     """Delete a strategy from database."""
-    conn = get_db_connection()
-    
+    service = StrategiesService()
     try:
-        # Check if strategy exists
-        result = conn.execute(
-            text("SELECT id FROM strategies WHERE id = :strategy_id AND user_id = :user_id"),
-            {"strategy_id": strategy_id, "user_id": current_user.user_id}
-        )
-        strategy = result.fetchone()
-        
-        if not strategy:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Strategy not found"
-            )
-        
-        # Delete from database (CASCADE will handle related tables)
-        conn.execute(
-            text("DELETE FROM strategies WHERE id = :strategy_id AND user_id = :user_id"),
-            {"strategy_id": strategy_id, "user_id": current_user.user_id}
-        )
-        conn.commit()
-        
-        print(f"[delete_strategy] Deleted strategy (id={strategy_id})")
-        
-    finally:
-        conn.close()
+        service.delete_strategy(current_user.user_id, strategy_id)
+    except KeyError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Strategy not found")
 
 
 @router.post("/{strategy_id}/validate", response_model=StrategyValidation)
@@ -372,32 +168,11 @@ async def list_strategy_code_history(
     current_user: TokenData = Depends(get_current_user)
 ):
     """List stored code history for a DB strategy (latest first)."""
-    conn = get_db_connection()
+    service = StrategiesService()
     try:
-        # Ensure strategy belongs to current user
-        owner_check = conn.execute(
-            text("SELECT id FROM strategies WHERE id = :sid AND user_id = :user_id"),
-            {"sid": strategy_id, "user_id": current_user.user_id}
-        ).fetchone()
-        if not owner_check:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Strategy not found")
-
-        rows = conn.execute(text("SELECT id, created_at, LENGTH(code) as size, strategy_name, class_name, description, version, parameters FROM strategy_history WHERE strategy_id = :sid ORDER BY created_at DESC"), {"sid": strategy_id}).fetchall()
-        out = []
-        for r in rows:
-            out.append({
-                "id": r.id,
-                "created_at": r.created_at.isoformat() if hasattr(r.created_at, 'isoformat') else str(r.created_at),
-                "size": int(r.size),
-                "strategy_name": getattr(r, 'strategy_name', None),
-                "class_name": getattr(r, 'class_name', None),
-                "description": getattr(r, 'description', None),
-                "version": getattr(r, 'version', None),
-                "parameters": getattr(r, 'parameters', None),
-            })
-        return out
-    finally:
-        conn.close()
+        return service.list_code_history(current_user.user_id, strategy_id)
+    except KeyError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Strategy not found")
 
 
 @router.get("/{strategy_id}/code-history/{history_id}")
@@ -407,22 +182,14 @@ async def get_strategy_code_history(
     current_user: TokenData = Depends(get_current_user)
 ):
     """Get a specific code history entry for a DB strategy."""
-    conn = get_db_connection()
+    service = StrategiesService()
     try:
-        # Ensure strategy belongs to current user
-        owner_check = conn.execute(
-            text("SELECT id FROM strategies WHERE id = :sid AND user_id = :user_id"),
-            {"sid": strategy_id, "user_id": current_user.user_id}
-        ).fetchone()
-        if not owner_check:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Strategy not found")
-
-        row = conn.execute(text("SELECT id, code, strategy_name, class_name, description, version, parameters FROM strategy_history WHERE id = :hid AND strategy_id = :sid"), {"hid": history_id, "sid": strategy_id}).fetchone()
-        if not row:
+        return service.get_code_history(current_user.user_id, strategy_id, history_id)
+    except KeyError as e:
+        msg = str(e)
+        if "History" in msg:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="History not found")
-        return {"id": history_id, "code": row.code, "strategy_name": getattr(row, 'strategy_name', None), "class_name": getattr(row, 'class_name', None), "description": getattr(row, 'description', None), "version": getattr(row, 'version', None), "parameters": getattr(row, 'parameters', None)}
-    finally:
-        conn.close()
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Strategy not found")
 
 
 @router.post("/{strategy_id}/code-history/{history_id}/restore")
@@ -432,85 +199,17 @@ async def restore_strategy_code_history(
     current_user: TokenData = Depends(get_current_user)
 ):
     """Restore a code history version to the strategy."""
-    conn = get_db_connection()
+    service = StrategiesService()
     try:
-        # Ensure strategy belongs to current user
-        owner_check = conn.execute(
-            text("SELECT id, code, name, class_name, description, version, parameters FROM strategies WHERE id = :sid AND user_id = :user_id"),
-            {"sid": strategy_id, "user_id": current_user.user_id}
-        ).fetchone()
-        if not owner_check:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Strategy not found")
-
-        # Get the history code
-        history_row = conn.execute(
-            text("SELECT code, strategy_name, class_name, description, version, parameters FROM strategy_history WHERE id = :hid AND strategy_id = :sid"),
-            {"hid": history_id, "sid": strategy_id}
-        ).fetchone()
-        if not history_row:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="History not found")
-
-        # Save current code and metadata to history before restoring
-        current_code = owner_check.code
-        if current_code:
-            now = datetime.utcnow()
-            import json as _json
-            prev_params = owner_check.parameters
-            try:
-                if isinstance(prev_params, str):
-                    params_json = prev_params
-                else:
-                    params_json = _json.dumps(prev_params) if prev_params is not None else '{}'
-            except Exception:
-                params_json = '{}'
-
-            conn.execute(
-                text("INSERT INTO strategy_history (strategy_id, strategy_name, class_name, description, version, parameters, code, created_at) VALUES (:sid, :sname, :class, :description, :version, :parameters, :code, :created_at)"),
-                {"sid": strategy_id, "sname": owner_check.name, "class": owner_check.class_name, "description": getattr(owner_check, 'description', None), "version": owner_check.version, "parameters": params_json, "code": current_code, "created_at": now}
-            )
-
-        # Restore the history metadata and code to the strategy (name, class, description, parameters, code)
-        import json as _json
-        hist_params = history_row.parameters
-        try:
-            if isinstance(hist_params, str):
-                params_val = hist_params
-            else:
-                params_val = _json.dumps(hist_params) if hist_params is not None else None
-        except Exception:
-            params_val = None
-
-        conn.execute(
-            text("""
-                UPDATE strategies SET
-                  name = :name,
-                  class_name = :class_name,
-                  description = :description,
-                  parameters = :parameters,
-                  code = :code,
-                  version = version + 1,
-                  updated_at = :updated_at
-                WHERE id = :sid
-            """),
-            {
-                # Apply history values verbatim; allow NULL/blank to overwrite current values
-                "name": getattr(history_row, 'strategy_name', None),
-                "class_name": getattr(history_row, 'class_name', None),
-                "description": getattr(history_row, 'description', None),
-                "parameters": params_val,
-                "code": history_row.code,
-                "updated_at": datetime.utcnow(),
-                "sid": strategy_id
-            }
-        )
-        conn.commit()
-
+        service.restore_code_history(current_user.user_id, strategy_id, history_id)
         return {"message": "Code history restored successfully", "strategy_id": strategy_id, "history_id": history_id}
+    except KeyError as e:
+        msg = str(e)
+        if "History" in msg:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="History not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Strategy not found")
     except Exception as e:
-        conn.rollback()
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-    finally:
-        conn.close()
 
 
 @router.get("/builtin/list", response_model=List[StrategyListItem])

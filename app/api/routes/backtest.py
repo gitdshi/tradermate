@@ -5,10 +5,8 @@ import uuid
 import json
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
-from sqlalchemy import text
 
 from app.api.models.user import TokenData
-from app.api.services.db import get_db_connection
 from app.api.models.backtest import (
     BacktestRequest,
     BatchBacktestRequest,
@@ -21,6 +19,8 @@ from app.api.middleware.auth import get_current_user
 from app.api.services.backtest_service import BacktestService
 from app.api.worker.tasks import save_backtest_to_db
 from app.api.services.job_storage import get_job_storage
+
+from app.domains.backtests.dao.backtest_history_dao import BacktestHistoryDao
 
 router = APIRouter(prefix="/backtest", tags=["Backtest"])
 
@@ -133,62 +133,42 @@ async def list_backtest_history(
     current_user: TokenData = Depends(get_current_user)
 ):
     """List past backtest runs for current user from database."""
-    conn = get_db_connection()
-    try:
-        # Get total count
-        count_result = conn.execute(
-            text("SELECT COUNT(*) as total FROM backtest_history WHERE user_id = :user_id"),
-            {"user_id": current_user.user_id}
-        )
-        total = count_result.fetchone().total
-        
-        # Get paginated results
-        result = conn.execute(
-            text("""
-                SELECT id, job_id, strategy_id, strategy_class, strategy_version, vt_symbol,
-                       start_date, end_date, status, result, created_at, completed_at
-                FROM backtest_history
-                WHERE user_id = :user_id
-                ORDER BY created_at DESC
-                LIMIT :limit OFFSET :offset
-            """),
-            {"user_id": current_user.user_id, "limit": limit, "offset": offset}
-        )
-        rows = result.fetchall()
-        
-        history = []
-        for row in rows:
-            # Extract key metrics from result JSON
-            total_return = None
-            sharpe_ratio = None
-            if row.result:
-                try:
-                    result_data = json.loads(row.result) if isinstance(row.result, str) else row.result
-                    stats = result_data.get("statistics", {})
-                    total_return = stats.get("total_return")
-                    sharpe_ratio = stats.get("sharpe_ratio")
-                except:
-                    pass
-            
-            history.append({
-                "id": row.id,
-                "job_id": row.job_id,
-                "strategy_id": row.strategy_id,
-                "strategy_class": row.strategy_class,
-                "strategy_version": row.strategy_version,
-                "vt_symbol": row.vt_symbol,
-                "start_date": str(row.start_date) if row.start_date else None,
-                "end_date": str(row.end_date) if row.end_date else None,
-                "status": row.status,
+    dao = BacktestHistoryDao()
+    total = dao.count_for_user(current_user.user_id)
+    rows = dao.list_for_user(user_id=current_user.user_id, limit=limit, offset=offset)
+
+    history = []
+    for row in rows:
+        total_return = None
+        sharpe_ratio = None
+        if row.get("result"):
+            try:
+                result_data = json.loads(row["result"]) if isinstance(row["result"], str) else row["result"]
+                stats = result_data.get("statistics", {}) if isinstance(result_data, dict) else {}
+                total_return = stats.get("total_return")
+                sharpe_ratio = stats.get("sharpe_ratio")
+            except Exception:
+                pass
+
+        history.append(
+            {
+                "id": row.get("id"),
+                "job_id": row.get("job_id"),
+                "strategy_id": row.get("strategy_id"),
+                "strategy_class": row.get("strategy_class"),
+                "strategy_version": row.get("strategy_version"),
+                "vt_symbol": row.get("vt_symbol"),
+                "start_date": str(row.get("start_date")) if row.get("start_date") else None,
+                "end_date": str(row.get("end_date")) if row.get("end_date") else None,
+                "status": row.get("status"),
                 "total_return": total_return,
                 "sharpe_ratio": sharpe_ratio,
-                "created_at": row.created_at.isoformat() if row.created_at else None,
-                "completed_at": row.completed_at.isoformat() if row.completed_at else None,
-            })
-        
-        return {"total": total, "jobs": history}
-    finally:
-        conn.close()
+                "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
+                "completed_at": row.get("completed_at").isoformat() if row.get("completed_at") else None,
+            }
+        )
+
+    return {"total": total, "jobs": history}
 
 
 @router.get("/history/{job_id}")
@@ -197,49 +177,41 @@ async def get_backtest_history_detail(
     current_user: TokenData = Depends(get_current_user)
 ):
     """Get detailed backtest result from database by job_id."""
-    conn = get_db_connection()
-    try:
-        result = conn.execute(
-            text("""
-                SELECT id, job_id, strategy_id, strategy_class, strategy_version, vt_symbol,
-                       start_date, end_date, parameters, status, result, error,
-                       created_at, completed_at
-                FROM backtest_history
-                WHERE job_id = :job_id AND user_id = :user_id
-            """),
-            {"job_id": job_id, "user_id": current_user.user_id}
-        )
-        row = result.fetchone()
-        
-        if not row:
-            raise HTTPException(status_code=404, detail="Backtest not found")
-        
-        # Parse result JSON
-        result_data = None
-        if row.result:
-            try:
-                result_data = json.loads(row.result) if isinstance(row.result, str) else row.result
-            except:
-                pass
-        
-        return {
-            "id": row.id,
-            "job_id": row.job_id,
-            "strategy_id": row.strategy_id,
-            "strategy_class": row.strategy_class,
-            "strategy_version": row.strategy_version,
-            "vt_symbol": row.vt_symbol,
-            "start_date": str(row.start_date) if row.start_date else None,
-            "end_date": str(row.end_date) if row.end_date else None,
-            "parameters": json.loads(row.parameters) if row.parameters else {},
-            "status": row.status,
-            "result": result_data,
-            "error": row.error,
-            "created_at": row.created_at.isoformat() if row.created_at else None,
-            "completed_at": row.completed_at.isoformat() if row.completed_at else None,
-        }
-    finally:
-        conn.close()
+    dao = BacktestHistoryDao()
+    row = dao.get_detail_for_user(job_id=job_id, user_id=current_user.user_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Backtest not found")
+
+    result_data = None
+    if row.get("result"):
+        try:
+            result_data = json.loads(row["result"]) if isinstance(row["result"], str) else row["result"]
+        except Exception:
+            result_data = None
+
+    params = {}
+    if row.get("parameters"):
+        try:
+            params = json.loads(row["parameters"]) if isinstance(row["parameters"], str) else row["parameters"]
+        except Exception:
+            params = {}
+
+    return {
+        "id": row.get("id"),
+        "job_id": row.get("job_id"),
+        "strategy_id": row.get("strategy_id"),
+        "strategy_class": row.get("strategy_class"),
+        "strategy_version": row.get("strategy_version"),
+        "vt_symbol": row.get("vt_symbol"),
+        "start_date": str(row.get("start_date")) if row.get("start_date") else None,
+        "end_date": str(row.get("end_date")) if row.get("end_date") else None,
+        "parameters": params,
+        "status": row.get("status"),
+        "result": result_data,
+        "error": row.get("error"),
+        "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
+        "completed_at": row.get("completed_at").isoformat() if row.get("completed_at") else None,
+    }
 
 
 @router.delete("/{job_id}")

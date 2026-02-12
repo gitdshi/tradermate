@@ -28,8 +28,12 @@ from app.api.worker.tasks import (
     run_optimization_task,
 )
 from app.api.services.job_storage import get_job_storage
-from app.api.services.db import get_db_connection, get_tushare_connection
-from sqlalchemy import text
+
+from app.domains.backtests.dao.akshare_benchmark_dao import AkshareBenchmarkDao
+from app.domains.backtests.dao.backtest_history_dao import BacktestHistoryDao
+from app.domains.backtests.dao.bulk_backtest_dao import BulkBacktestDao
+from app.domains.backtests.dao.strategy_source_dao import StrategySourceDao
+from app.domains.market.service import MarketService
 
 
 def calculate_alpha_beta(strategy_returns: np.ndarray, benchmark_returns: np.ndarray) -> tuple:
@@ -52,94 +56,19 @@ def calculate_alpha_beta(strategy_returns: np.ndarray, benchmark_returns: np.nda
 
 
 def get_benchmark_data(start_date: date, end_date: date, benchmark_symbol: str = "399300.SZ") -> Optional[Dict]:
-    from app.api.services.db import get_akshare_connection
-    conn = get_akshare_connection()
     try:
-        candidates = [benchmark_symbol]
-        if benchmark_symbol and benchmark_symbol.endswith('.SH') and benchmark_symbol.startswith('000'):
-            candidates.append(benchmark_symbol.replace('000', '399').replace('.SH', '.SZ'))
-        if benchmark_symbol and (benchmark_symbol.endswith('.SH') or benchmark_symbol.endswith('.SZ')):
-            alt = benchmark_symbol[:-3] + ('.SZ' if benchmark_symbol.endswith('.SH') else '.SH')
-            candidates.append(alt)
-
-        rows = []
-        for idx_code in dict.fromkeys(candidates):
-            query = """
-                SELECT trade_date, close
-                FROM index_daily
-                WHERE index_code = :index_code
-                  AND trade_date >= :start_date
-                  AND trade_date <= :end_date
-                ORDER BY trade_date ASC
-            """
-            result = conn.execute(text(query), {
-                "index_code": idx_code,
-                "start_date": start_date.strftime("%Y-%m-%d"),
-                "end_date": end_date.strftime("%Y-%m-%d")
-            })
-            rows = result.fetchall()
-            if rows and len(rows) >= 2:
-                break
-
-        if not rows or len(rows) < 2:
-            return None
-
-        dates = [row.trade_date for row in rows]
-        closes = np.array([float(row.close) for row in rows], dtype=float)
-        daily_returns = np.diff(closes) / closes[:-1]
-        total_return = (closes[-1] - closes[0]) / closes[0] * 100
-
-        prices = []
-        for dt_val, close_val in zip(dates, closes):
-            if isinstance(dt_val, str):
-                try:
-                    dt_obj = datetime.strptime(dt_val, "%Y%m%d")
-                except Exception:
-                    try:
-                        dt_obj = datetime.fromisoformat(dt_val)
-                    except Exception:
-                        dt_obj = None
-            else:
-                try:
-                    dt_obj = datetime.combine(dt_val, datetime.min.time())
-                except Exception:
-                    dt_obj = None
-
-            prices.append({
-                "datetime": dt_obj.isoformat() if dt_obj else None,
-                "close": float(close_val)
-            })
-
-        return {
-            "returns": daily_returns,
-            "total_return": float(total_return),
-            "closes": closes.tolist(),
-            "prices": prices
-        }
+        return AkshareBenchmarkDao().get_benchmark_data(start=start_date, end=end_date, benchmark_symbol=benchmark_symbol)
     except Exception as e:
         print(f"Error fetching benchmark data: {e}")
         return None
-    finally:
-        conn.close()
 
 
 def get_stock_name(ts_code: str) -> Optional[str]:
-    conn = get_tushare_connection()
     try:
-        query = """
-            SELECT name
-            FROM stock_basic
-            WHERE ts_code = :ts_code
-            LIMIT 1
-        """
-        result = conn.execute(text(query), {"ts_code": ts_code})
-        row = result.fetchone()
-        return row.name if row else None
+        return MarketService().resolve_symbol_name(ts_code) or None
     except Exception as e:
         print(f"Error fetching stock name: {e}")
         return None
-    finally:
-        conn.close()
 
 
 class BacktestServiceV2:
@@ -164,18 +93,7 @@ class BacktestServiceV2:
             strategy_code, strategy_class_name, strategy_version = self._get_strategy_from_db(strategy_id, user_id)
 
         if not symbol_name:
-            conn = get_db_connection()
-            try:
-                result_row = conn.execute(
-                    text("SELECT name FROM stock_basic WHERE ts_code = :s OR symbol = :s LIMIT 1"),
-                    {"s": symbol}
-                ).fetchone()
-                if result_row:
-                    symbol_name = result_row.name if hasattr(result_row, 'name') else list(result_row)[0]
-            except Exception:
-                pass
-            finally:
-                conn.close()
+            symbol_name = MarketService().resolve_symbol_name(symbol) or ""
 
         metadata = {
             "job_id": job_id,
@@ -258,43 +176,26 @@ class BacktestServiceV2:
         }
         self.job_storage.save_job_metadata(job_id, metadata)
 
-        import json as _json
-        conn = get_db_connection()
         try:
-            conn.execute(
-                text("""
-                    INSERT INTO bulk_backtest
-                    (user_id, job_id, strategy_id, strategy_class, strategy_version,
-                     symbols, start_date, end_date, parameters, initial_capital,
-                     rate, slippage, benchmark, status, total_symbols, created_at)
-                    VALUES
-                    (:user_id, :job_id, :strategy_id, :strategy_class, :strategy_version,
-                     :symbols, :start_date, :end_date, :parameters, :initial_capital,
-                     :rate, :slippage, :benchmark, 'queued', :total_symbols, :created_at)
-                """),
-                {
-                    "user_id": user_id,
-                    "job_id": job_id,
-                    "strategy_id": strategy_id,
-                    "strategy_class": strategy_class_name,
-                    "strategy_version": strategy_version,
-                    "symbols": _json.dumps(symbols),
-                    "start_date": start_date.isoformat(),
-                    "end_date": end_date.isoformat(),
-                    "parameters": _json.dumps(parameters) if parameters else "{}",
-                    "initial_capital": initial_capital,
-                    "rate": rate,
-                    "slippage": slippage,
-                    "benchmark": benchmark,
-                    "total_symbols": len(symbols),
-                    "created_at": datetime.now(),
-                }
+            BulkBacktestDao().insert_parent(
+                user_id=user_id,
+                job_id=job_id,
+                strategy_id=strategy_id,
+                strategy_class=strategy_class_name,
+                strategy_version=strategy_version,
+                symbols_json=json.dumps(symbols),
+                start_date=start_date.isoformat(),
+                end_date=end_date.isoformat(),
+                parameters_json=json.dumps(parameters) if parameters else "{}",
+                initial_capital=initial_capital,
+                rate=rate,
+                slippage=slippage,
+                benchmark=benchmark,
+                total_symbols=len(symbols),
+                created_at=datetime.now(),
             )
-            conn.commit()
         except Exception as e:
             print(f"[Service] Error inserting bulk_backtest row: {e}")
-        finally:
-            conn.close()
 
         queue = get_queue('backtest')
         queue.enqueue(
@@ -390,20 +291,13 @@ class BacktestServiceV2:
         }
         if job_id.startswith("bulk_"):
             try:
-                conn = get_db_connection()
-                try:
-                    row = conn.execute(
-                        text("SELECT best_return, best_symbol, completed_count, status as bulk_status FROM bulk_backtest WHERE job_id = :jid"),
-                        {"jid": job_id}
-                    ).fetchone()
-                    if row and row.best_return is not None:
-                        if not response["result"]:
-                            response["result"] = {}
-                        response["result"]["best_return"] = float(row.best_return)
-                        response["result"]["best_symbol"] = row.best_symbol
-                        response["result"]["completed_count"] = row.completed_count
-                finally:
-                    conn.close()
+                row = BulkBacktestDao().get_metrics(job_id)
+                if row and row.get("best_return") is not None:
+                    if not response["result"]:
+                        response["result"] = {}
+                    response["result"]["best_return"] = float(row.get("best_return"))
+                    response["result"]["best_symbol"] = row.get("best_symbol")
+                    response["result"]["completed_count"] = row.get("completed_count")
             except Exception:
                 pass
 
@@ -428,117 +322,58 @@ class BacktestServiceV2:
         return self.job_storage.cancel_job(job_id, queue)
 
     def _get_strategy_from_db(self, strategy_id: int, user_id: int) -> tuple:
-        conn = get_db_connection()
         try:
-            result = conn.execute(
-                text("SELECT code, class_name, version FROM strategies WHERE id = :id AND user_id = :user_id"),
-                {"id": strategy_id, "user_id": user_id}
-            )
-            row = result.fetchone()
-            if not row:
-                raise ValueError(f"Strategy {strategy_id} not found or access denied")
-            return row.code, row.class_name, row.version
-        finally:
-            conn.close()
+            return StrategySourceDao().get_strategy_source_for_user(strategy_id, user_id)
+        except KeyError:
+            raise ValueError(f"Strategy {strategy_id} not found or access denied")
 
     def _get_child_job_from_db(self, job_id: str, user_id: int) -> Optional[Dict[str, Any]]:
         import json as _json
-        conn = get_db_connection()
         try:
-            row = conn.execute(
-                text("""
-                    SELECT job_id, user_id, bulk_job_id, strategy_id, strategy_class,
-                           strategy_version, vt_symbol, start_date, end_date,
-                           parameters, status, result, error, created_at, completed_at
-                    FROM backtest_history
-                    WHERE job_id = :jid
-                    LIMIT 1
-                """),
-                {"jid": job_id}
-            ).fetchone()
-            if not row or row.user_id != user_id:
+            row = BacktestHistoryDao().get_job_row(job_id)
+            if not row or row.get("user_id") != user_id:
                 return None
+
             result_data = None
-            if row.result:
+            if row.get("result"):
                 try:
-                    result_data = _json.loads(row.result) if isinstance(row.result, str) else row.result
+                    result_data = _json.loads(row["result"]) if isinstance(row["result"], str) else row["result"]
                 except Exception:
                     result_data = None
 
-            symbol_name = ""
-            try:
-                from app.api.services.db import get_tushare_connection
-                ts_conn = get_tushare_connection()
-                try:
-                    srow = ts_conn.execute(
-                        text("SELECT name FROM stock_basic WHERE ts_code = :s LIMIT 1"),
-                        {"s": row.vt_symbol}
-                    ).fetchone()
-                    if srow and getattr(srow, 'name', None):
-                        symbol_name = srow.name
-                finally:
-                    ts_conn.close()
-            except Exception:
-                pass
+            symbol_name = MarketService().resolve_symbol_name(row.get("vt_symbol") or "")
 
-            if not symbol_name and isinstance(row.vt_symbol, str) and len(row.vt_symbol) >= 9:
-                try:
-                    from app.api.services.db import get_akshare_connection
-                    ak_conn = get_akshare_connection()
-                    try:
-                        irow = ak_conn.execute(
-                            text("SELECT trade_date, close FROM index_daily WHERE index_code = :c ORDER BY trade_date DESC LIMIT 1"),
-                            {"c": row.vt_symbol}
-                        ).fetchone()
-                        if irow:
-                            symbol_name = f"Index {row.vt_symbol}"
-                    finally:
-                        ak_conn.close()
-                except Exception:
-                    if not symbol_name:
-                        symbol_name = f"Index {row.vt_symbol}"
-
-            strategy_name = row.strategy_class or ""
-            if row.strategy_id:
-                try:
-                    srow = conn.execute(text("SELECT name FROM strategies WHERE id = :sid LIMIT 1"), {"sid": row.strategy_id}).fetchone()
-                    if srow:
-                        strategy_name = srow.name
-                except Exception:
-                    pass
-
+            strategy_name = row.get("strategy_class") or ""
             params = {}
-            if row.parameters:
+            if row.get("parameters"):
                 try:
-                    params = _json.loads(row.parameters) if isinstance(row.parameters, str) else row.parameters
+                    params = _json.loads(row["parameters"]) if isinstance(row["parameters"], str) else row["parameters"]
                 except Exception:
-                    pass
+                    params = {}
 
             return {
                 "job_id": job_id,
-                "status": row.status or "completed",
+                "status": row.get("status") or "completed",
                 "type": "backtest",
-                "progress": 100 if row.status == "completed" else 0,
+                "progress": 100 if row.get("status") == "completed" else 0,
                 "progress_message": "",
-                "created_at": row.created_at.isoformat() if row.created_at else None,
-                "updated_at": row.completed_at.isoformat() if row.completed_at else None,
+                "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
+                "updated_at": row.get("completed_at").isoformat() if row.get("completed_at") else None,
                 "result": result_data,
-                "symbol": row.vt_symbol,
+                "symbol": row.get("vt_symbol"),
                 "symbol_name": symbol_name,
-                "strategy_id": row.strategy_id,
-                "strategy_class": row.strategy_class,
+                "strategy_id": row.get("strategy_id"),
+                "strategy_class": row.get("strategy_class"),
                 "strategy_name": strategy_name,
-                "strategy_version": row.strategy_version,
-                "start_date": row.start_date.isoformat() if row.start_date else None,
-                "end_date": row.end_date.isoformat() if row.end_date else None,
+                "strategy_version": row.get("strategy_version"),
+                "start_date": row.get("start_date").isoformat() if row.get("start_date") else None,
+                "end_date": row.get("end_date").isoformat() if row.get("end_date") else None,
                 "parameters": params,
-                "bulk_job_id": row.bulk_job_id,
+                "bulk_job_id": row.get("bulk_job_id"),
             }
         except Exception as e:
             print(f"[Service] Error loading child job {job_id} from DB: {e}")
             return None
-        finally:
-            conn.close()
 
 
 class BacktestService(BacktestServiceV2):
@@ -566,19 +401,14 @@ class BacktestService(BacktestServiceV2):
         if strategy_class and strategy_class in self.builtin_strategies:
             return self.builtin_strategies[strategy_class]
         if strategy_id:
-            conn = get_db_connection()
-            try:
-                result = conn.execute(text("SELECT code, class_name FROM strategies WHERE id = :id"), {"id": strategy_id})
-                row = result.fetchone()
-                if row:
-                    namespace = {}
-                    from vnpy_ctastrategy import CtaTemplate
-                    namespace["CtaTemplate"] = CtaTemplate
-                    exec(row.code, namespace)
-                    if row.class_name in namespace:
-                        return namespace[row.class_name]
-            finally:
-                conn.close()
+            from app.api.services.strategy_service import compile_strategy
+            # Prefer user-scoped load if possible
+            if user_id is not None:
+                code, class_name, _ = StrategySourceDao().get_strategy_source_for_user(strategy_id, user_id)
+            else:
+                # fallback by class_name not supported here; require user_id
+                raise ValueError("user_id is required to load strategy code")
+            return compile_strategy(code, class_name)
         raise ValueError(f"Strategy not found: id={strategy_id}, class={strategy_class}")
 
     def run_single_backtest(self, strategy_id: Optional[int], strategy_class: Optional[str], vt_symbol: str,

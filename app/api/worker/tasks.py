@@ -17,9 +17,13 @@ from vnpy.trader.constant import Interval
 from vnpy_ctastrategy.backtesting import BacktestingEngine
 from app.backtest.ts_utils import moving_average, pct_change
 from app.api.services.strategy_service import compile_strategy
-from app.api.services.db import get_db_connection, get_akshare_connection
 from app.api.services.job_storage import get_job_storage
-from sqlalchemy import text
+
+from app.domains.market.service import MarketService
+from app.domains.backtests.dao.akshare_benchmark_dao import AkshareBenchmarkDao
+from app.domains.backtests.dao.backtest_history_dao import BacktestHistoryDao
+from app.domains.backtests.dao.bulk_backtest_dao import BulkBacktestDao
+from app.domains.backtests.dao.strategy_source_dao import StrategySourceDao
 
 
 def convert_to_vnpy_symbol(ts_symbol: str) -> str:
@@ -43,137 +47,28 @@ def convert_to_vnpy_symbol(ts_symbol: str) -> str:
 
 
 def resolve_symbol_name(input_symbol: str) -> str:
-    """Resolve a human-readable symbol name from `tushare.stock_basic.name`.
+    """Resolve a human-readable symbol name.
 
-    This function attempts several fallbacks to map various symbol formats
-    (ts_code like '000001.SZ', vnpy like '000001.SZSE', or plain symbol)
-    to the `stock_basic.name` field.
+    Delegates to the Market domain (DAO-backed). Kept as a thin wrapper for
+    backward compatibility inside worker/tasks.
     """
-    if not input_symbol:
-        return ""
-
-    conn = None
     try:
-        conn = get_tushare_connection()
-
-        # 1) Direct match against ts_code or symbol
-        row = conn.execute(
-            text("SELECT name FROM stock_basic WHERE ts_code = :s OR symbol = :s LIMIT 1"),
-            {"s": input_symbol}
-        ).fetchone()
-        if row:
-            return row.name if hasattr(row, 'name') else list(row)[0]
-
-        # 2) If input looks like a vnpy symbol (e.g. '000001.SZSE'), try to convert
-        if "." in input_symbol:
-            code, suffix = input_symbol.rsplit('.', 1)
-            # Map common vnpy exchange suffixes back to tushare suffixes
-            rev_map = {"SZSE": "SZ", "SSE": "SH", "BSE": "BJ"}
-            ts_suffix = rev_map.get(suffix.upper())
-            if ts_suffix:
-                alt = f"{code}.{ts_suffix}"
-                row2 = conn.execute(
-                    text("SELECT name FROM stock_basic WHERE ts_code = :s OR symbol = :sym LIMIT 1"),
-                    {"s": alt, "sym": code}
-                ).fetchone()
-                if row2:
-                    return row2.name if hasattr(row2, 'name') else list(row2)[0]
-
-        # 3) Try numeric-only symbol (strip non-digits)
-        numeric = ''.join(ch for ch in input_symbol if ch.isdigit())
-        if numeric:
-            row3 = conn.execute(
-                text("SELECT name FROM stock_basic WHERE symbol = :sym LIMIT 1"),
-                {"sym": numeric}
-            ).fetchone()
-            if row3:
-                return row3.name if hasattr(row3, 'name') else list(row3)[0]
-
-        return ""
+        return MarketService().resolve_symbol_name(input_symbol)
     except Exception:
         return ""
-    finally:
-        try:
-            if conn:
-                conn.close()
-        except Exception:
-            pass
 
 
 def get_benchmark_data_for_worker(start_date: str, end_date: str, benchmark_symbol: str = "399300.SZ") -> Optional[Dict]:
     """
     Fetch HS300 benchmark data for the given period (worker version).
     """
-    # Use AkShare DB for benchmark/index data
-    conn = get_akshare_connection()
-    
     try:
-        # Convert date format - handle both string and date objects
-        if isinstance(start_date, str):
-            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-        else:
-            start_dt = datetime.combine(start_date, datetime.min.time())
-        
-        if isinstance(end_date, str):
-            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-        else:
-            end_dt = datetime.combine(end_date, datetime.min.time())
-        
-        # Note: index_daily uses 'index_code' column, not 'ts_code'
-        query = """
-            SELECT trade_date, close
-            FROM index_daily
-            WHERE index_code = :index_code
-              AND trade_date >= :start_date
-              AND trade_date <= :end_date
-            ORDER BY trade_date ASC
-        """
-        
-        result = conn.execute(text(query), {
-            "index_code": benchmark_symbol,
-            "start_date": start_dt.strftime("%Y-%m-%d"),
-            "end_date": end_dt.strftime("%Y-%m-%d")
-        })
-        rows = result.fetchall()
-        
-        if not rows or len(rows) < 2:
-            return None
-        
-        # Extract dates and closes
-        dates = [row.trade_date for row in rows]
-        closes = np.array([float(row.close) for row in rows])
-        daily_returns = np.diff(closes) / closes[:-1]
-        total_return = (closes[-1] - closes[0]) / closes[0] * 100
-        
-        # Format prices for chart
-        prices = []
-        for date_val, close_val in zip(dates, closes):
-            # Handle both string (YYYYMMDD) and datetime.date objects from DB
-            if isinstance(date_val, str):
-                # AkShare may return 'YYYY-MM-DD' strings
-                try:
-                    dt_obj = datetime.strptime(date_val, "%Y-%m-%d")
-                except Exception:
-                    dt_obj = datetime.strptime(date_val, "%Y%m%d")
-            else:
-                # Already a date/datetime object
-                dt_obj = datetime.combine(date_val, datetime.min.time()) if not isinstance(date_val, datetime) else date_val
-            prices.append({
-                "datetime": dt_obj.isoformat(),
-                "close": float(close_val)
-            })
-        
-        return {
-            "returns": daily_returns,
-            "total_return": float(total_return),
-            "prices": prices
-        }
-        
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").date() if isinstance(start_date, str) else start_date
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").date() if isinstance(end_date, str) else end_date
+        return AkshareBenchmarkDao().get_benchmark_data(start=start_dt, end=end_dt, benchmark_symbol=benchmark_symbol)
     except Exception as e:
         print(f"[Worker] Error fetching benchmark data: {e}")
         return None
-    finally:
-        conn.close()
 
 
 def calculate_alpha_beta_for_worker(strategy_returns: np.ndarray, benchmark_returns: np.ndarray) -> tuple:
@@ -205,45 +100,27 @@ def save_backtest_to_db(job_id: str, user_id: int, strategy_id: Optional[int],
                         end_date: str, parameters: Dict, status: str, 
                         result: Dict, error: str = None, strategy_version: int = None):
     """Save backtest result to database for permanent storage."""
-    conn = get_db_connection()
     try:
         now = datetime.utcnow()
-        conn.execute(
-            text("""
-                INSERT INTO backtest_history 
-                (user_id, job_id, strategy_id, strategy_class, strategy_version, vt_symbol, 
-                 start_date, end_date, parameters, status, result, error, 
-                 created_at, completed_at)
-                VALUES 
-                (:user_id, :job_id, :strategy_id, :strategy_class, :strategy_version, :vt_symbol,
-                 :start_date, :end_date, :parameters, :status, :result, :error,
-                 :created_at, :completed_at)
-                ON DUPLICATE KEY UPDATE
-                status = :status, result = :result, error = :error, completed_at = :completed_at
-            """),
-            {
-                "user_id": user_id,
-                "job_id": job_id,
-                "strategy_id": strategy_id,
-                "strategy_class": strategy_class,
-                "strategy_version": strategy_version,
-                "vt_symbol": symbol,
-                "start_date": start_date,
-                "end_date": end_date,
-                "parameters": json.dumps(parameters) if parameters else "{}",
-                "status": status,
-                "result": json.dumps(result) if result else None,
-                "error": error,
-                "created_at": now,
-                "completed_at": now if status in ["completed", "failed"] else None
-            }
+        BacktestHistoryDao().upsert_history(
+            user_id=user_id,
+            job_id=job_id,
+            strategy_id=strategy_id,
+            strategy_class=strategy_class,
+            strategy_version=strategy_version,
+            vt_symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            parameters=parameters or {},
+            status=status,
+            result=result,
+            error=error,
+            created_at=now,
+            completed_at=now if status in ["completed", "failed"] else None,
         )
-        conn.commit()
         print(f"[Worker] Saved backtest {job_id} to database")
     except Exception as e:
         print(f"[Worker] Error saving to database: {e}")
-    finally:
-        conn.close()
 
 
 def run_backtest_task(
@@ -305,45 +182,19 @@ def run_backtest_task(
             # Compile custom strategy provided with the job
             strategy_class = compile_strategy(strategy_code, strategy_class_name)
         else:
-            # Attempt to load strategy source from tradermate DB
-            conn = get_db_connection()
-            try:
-                row = None
-                if strategy_id is not None:
-                    row = conn.execute(
-                        text("SELECT * FROM strategies WHERE id = :id LIMIT 1"),
-                        {"id": strategy_id}
-                    ).fetchone()
-
-                if not row and strategy_class_name:
-                    row = conn.execute(
-                        text("SELECT * FROM strategies WHERE class_name = :classname LIMIT 1"),
-                        {"classname": strategy_class_name}
-                    ).fetchone()
-
-                if not row:
-                    raise ValueError("No strategy code provided and no matching strategy found in database; jobs must include `strategy_code` or a valid `strategy_id`")
-
-                # Convert row to dict and look for common code fields
-                rowdict = dict(row)
-                code_candidates = [
-                    'code', 'strategy_code', 'source', 'content', 'strategy_source', 'script'
-                ]
-                strategy_code_db = None
-                for k in code_candidates:
-                    if k in rowdict and rowdict[k]:
-                        strategy_code_db = rowdict[k]
-                        break
-
-                if not strategy_code_db:
-                    raise ValueError("Found strategy record in DB but no code/source column available to compile")
-
+            # Attempt to load strategy source from tradermate DB (DAO-backed)
+            source_dao = StrategySourceDao()
+            if strategy_id is not None and user_id is not None:
+                strategy_code_db, strategy_class_name_db, _sv = source_dao.get_strategy_source_for_user(strategy_id, user_id)
+                # Prefer class name from DB if provided
+                if strategy_class_name_db:
+                    strategy_class_name = strategy_class_name_db
                 strategy_class = compile_strategy(strategy_code_db, strategy_class_name)
-            finally:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+            elif strategy_class_name:
+                strategy_code_db = source_dao.get_strategy_code_by_class_name(strategy_class_name)
+                strategy_class = compile_strategy(strategy_code_db, strategy_class_name)
+            else:
+                raise ValueError("No strategy code provided and no matching strategy found in database; jobs must include `strategy_code` or a valid `strategy_id`")
         
         # Initialize backtest engine
         engine = BacktestingEngine()
@@ -721,91 +572,51 @@ def _save_bulk_child(child_job_id, bulk_job_id, user_id, strategy_id,
                      strategy_class, strategy_version, symbol, start_date,
                      end_date, parameters, status, result, error=None):
     """Insert a child backtest row linked to a bulk job."""
-    conn = get_db_connection()
     try:
         now = datetime.utcnow()
-        conn.execute(
-            text("""
-                INSERT INTO backtest_history
-                (user_id, job_id, bulk_job_id, strategy_id, strategy_class,
-                 strategy_version, vt_symbol, start_date, end_date, parameters,
-                 status, result, error, created_at, completed_at)
-                VALUES
-                (:user_id, :job_id, :bulk_job_id, :strategy_id, :strategy_class,
-                 :strategy_version, :vt_symbol, :start_date, :end_date, :parameters,
-                 :status, :result, :error, :created_at, :completed_at)
-                ON DUPLICATE KEY UPDATE
-                status = :status, result = :result, error = :error, completed_at = :completed_at
-            """),
-            {
-                "user_id": user_id,
-                "job_id": child_job_id,
-                "bulk_job_id": bulk_job_id,
-                "strategy_id": strategy_id,
-                "strategy_class": strategy_class,
-                "strategy_version": strategy_version,
-                "vt_symbol": symbol,
-                "start_date": start_date,
-                "end_date": end_date,
-                "parameters": json.dumps(parameters) if parameters else "{}",
-                "status": status,
-                "result": json.dumps(result) if result else None,
-                "error": error,
-                "created_at": now,
-                "completed_at": now if status in ("completed", "failed") else None,
-            }
+        BacktestHistoryDao().upsert_history(
+            user_id=user_id,
+            job_id=child_job_id,
+            bulk_job_id=bulk_job_id,
+            strategy_id=strategy_id,
+            strategy_class=strategy_class,
+            strategy_version=strategy_version,
+            vt_symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            parameters=parameters or {},
+            status=status,
+            result=result,
+            error=error,
+            created_at=now,
+            completed_at=now if status in ("completed", "failed") else None,
         )
-        conn.commit()
     except Exception as e:
         print(f"[Worker] Error saving bulk child {child_job_id}: {e}")
-    finally:
-        conn.close()
 
 
 def _update_bulk_row(job_id, completed_count, best_return, best_symbol, best_symbol_name=None):
     """Incremental update of the bulk_backtest row."""
-    conn = get_db_connection()
     try:
-        conn.execute(
-            text("""
-                UPDATE bulk_backtest
-                SET completed_count = :cc, best_return = :br, best_symbol = :bs
-                """ + (", best_symbol_name = :bsn" if True else "") + """
-                WHERE job_id = :jid
-            """),
-            {"cc": completed_count, "br": best_return, "bs": best_symbol, "bsn": best_symbol_name, "jid": job_id}
-        )
-        conn.commit()
+        BulkBacktestDao().update_progress(job_id, completed_count, best_return, best_symbol, best_symbol_name)
     except Exception as e:
         print(f"[Worker] Error updating bulk row: {e}")
-    finally:
-        conn.close()
 
 
 def _finish_bulk_row(job_id, status, best_return, best_symbol, best_symbol_name, completed_count):
     """Mark bulk_backtest row as completed/failed."""
-    conn = get_db_connection()
     try:
-        conn.execute(
-            text("""
-                UPDATE bulk_backtest
-                SET status = :st, completed_count = :cc,
-                    best_return = :br, best_symbol = :bs,
-                    best_symbol_name = :bsn,
-                    completed_at = :ca
-                WHERE job_id = :jid
-            """),
-            {
-                "st": status, "cc": completed_count,
-                "br": best_return, "bs": best_symbol, "bsn": best_symbol_name,
-                "ca": datetime.utcnow(), "jid": job_id,
-            }
+        BulkBacktestDao().finish(
+            job_id,
+            status,
+            datetime.utcnow(),
+            completed_count,
+            best_return,
+            best_symbol,
+            best_symbol_name,
         )
-        conn.commit()
     except Exception as e:
         print(f"[Worker] Error finishing bulk row: {e}")
-    finally:
-        conn.close()
 
 
 def run_optimization_task(

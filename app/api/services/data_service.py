@@ -2,17 +2,19 @@
 from datetime import date, datetime
 from typing import List, Optional, Dict, Any
 import pandas as pd
-from sqlalchemy import text
 
 from app.api.config import get_settings
-from app.api.services.db import get_tushare_connection, get_vnpy_engine, get_akshare_connection
 from app.backtest.ts_utils import moving_average, pct_change
+
+from app.domains.market.service import MarketService
 
 settings = get_settings()
 
 
 class DataService:
     """Service for fetching and processing market data."""
+    def __init__(self) -> None:
+        self._market = MarketService()
     
     def get_symbols(
         self,
@@ -22,54 +24,7 @@ class DataService:
         offset: int = 0
     ) -> List[Dict[str, Any]]:
         """Get list of available symbols."""
-        conn = get_tushare_connection()
-        
-        try:
-            query = """
-                SELECT ts_code, name, exchange, industry, list_date
-                FROM stock_basic
-                WHERE (list_status = 'L' OR list_status IS NULL)
-            """
-            params = {}
-            
-            if exchange:
-                # Map SZSE/SSE to tushare format SZ/SH
-                exch_map = {"SZSE": "SZ", "SSE": "SH", "SZ": "SZ", "SH": "SH"}
-                exch = exch_map.get(exchange.upper(), exchange)
-                query += " AND exchange = :exchange"
-                params["exchange"] = exch
-            
-            if keyword:
-                query += " AND (ts_code LIKE :kw OR name LIKE :kw)"
-                params["kw"] = f"%{keyword}%"
-            
-            query += " ORDER BY ts_code LIMIT :limit OFFSET :offset"
-            params["limit"] = limit
-            params["offset"] = offset
-            
-            result = conn.execute(text(query), params)
-            rows = result.fetchall()
-            
-            symbols = []
-            for row in rows:
-                ts_code = row.ts_code
-                symbol = ts_code.split(".")[0]
-                suffix = ts_code.split(".")[1] if "." in ts_code else "SZ"
-                vt_exchange = "SZSE" if suffix == "SZ" else "SSE"
-                
-                symbols.append({
-                    "symbol": symbol,
-                    "name": row.name,
-                    "exchange": vt_exchange,
-                    "vt_symbol": f"{symbol}.{vt_exchange}",
-                    "industry": row.industry,
-                    "list_date": row.list_date
-                })
-            
-            return symbols
-            
-        finally:
-            conn.close()
+        return self._market.list_symbols(exchange=exchange, keyword=keyword, limit=limit, offset=offset)
     
     def get_history(
         self,
@@ -79,59 +34,7 @@ class DataService:
         interval: str = "daily"
     ) -> List[Dict[str, Any]]:
         """Get historical OHLC data for a symbol."""
-        # Parse vt_symbol
-        parts = vt_symbol.split(".")
-        if len(parts) != 2:
-            raise ValueError(f"Invalid vt_symbol format: {vt_symbol}")
-        
-        symbol, exchange = parts
-        ts_suffix = "SZ" if exchange == "SZSE" else "SH"
-        ts_code = f"{symbol}.{ts_suffix}"
-        
-        conn = get_tushare_connection()
-        
-        try:
-            query = """
-                SELECT trade_date, open, high, low, close, vol, amount
-                FROM stock_daily
-                WHERE ts_code = :ts_code
-                  AND trade_date >= :start_date
-                  AND trade_date <= :end_date
-                ORDER BY trade_date ASC
-            """
-            
-            result = conn.execute(text(query), {
-                "ts_code": ts_code,
-                "start_date": start_date.strftime("%Y-%m-%d"),
-                "end_date": end_date.strftime("%Y-%m-%d")
-            })
-            rows = result.fetchall()
-            
-            bars = []
-            for row in rows:
-                trade_date = row.trade_date
-                if isinstance(trade_date, str):
-                    try:
-                        dt = datetime.strptime(trade_date, "%Y-%m-%d")
-                    except:
-                        dt = datetime.strptime(trade_date, "%Y%m%d")
-                else:
-                    dt = datetime.combine(trade_date, datetime.min.time())
-                
-                bars.append({
-                    "datetime": dt,
-                    "open": float(row.open) if row.open else 0.0,
-                    "high": float(row.high) if row.high else 0.0,
-                    "low": float(row.low) if row.low else 0.0,
-                    "close": float(row.close) if row.close else 0.0,
-                    "volume": float(row.vol) if row.vol else 0.0,
-                    "amount": float(row.amount) if row.amount else 0.0
-                })
-            
-            return bars
-            
-        finally:
-            conn.close()
+        return self._market.get_history(vt_symbol, start_date, end_date)
     
     def get_indicators(
         self,
@@ -197,79 +100,15 @@ class DataService:
     
     def get_market_overview(self) -> Dict[str, Any]:
         """Get market overview statistics."""
-        conn = get_tushare_connection()
-        
-        try:
-            # Get counts by exchange
-            result = conn.execute(text("""
-                SELECT exchange, COUNT(*) as count
-                FROM stock_basic
-                WHERE (list_status = 'L' OR list_status IS NULL)
-                  AND exchange IS NOT NULL
-                GROUP BY exchange
-            """))
-            exchange_counts = {row.exchange: row.count for row in result.fetchall()}
-            
-            # Get data date range
-            result = conn.execute(text("""
-                SELECT MIN(trade_date) as min_date, MAX(trade_date) as max_date
-                FROM stock_daily
-            """))
-            date_range = result.fetchone()
-            
-            return {
-                "exchanges": exchange_counts,
-                "total_symbols": sum(exchange_counts.values()),
-                "data_start_date": date_range.min_date if date_range else None,
-                "data_end_date": date_range.max_date if date_range else None
-            }
-            
-        finally:
-            conn.close()
+        return self._market.market_overview()
     
     def get_sectors(self) -> List[Dict[str, Any]]:
         """Get sector information."""
-        conn = get_tushare_connection()
-        
-        try:
-            result = conn.execute(text("""
-                SELECT industry, COUNT(*) as count
-                FROM stock_basic
-                WHERE (list_status = 'L' OR list_status IS NULL)
-                  AND industry IS NOT NULL
-                GROUP BY industry
-                ORDER BY count DESC
-            """))
-            
-            return [
-                {"name": row.industry, "count": row.count}
-                for row in result.fetchall()
-            ]
-            
-        finally:
-            conn.close()
+        return self._market.sectors()
 
     def get_exchanges(self) -> List[Dict[str, Any]]:
         """Get exchange-level groupings with counts."""
-        conn = get_tushare_connection()
-        try:
-            result = conn.execute(text("""
-                SELECT exchange, COUNT(*) as count
-                FROM stock_basic
-                WHERE (list_status = 'L' OR list_status IS NULL)
-                  AND exchange IS NOT NULL
-                GROUP BY exchange
-                ORDER BY count DESC
-            """))
-            name_map = {"SZSE": "深圳证券交易所", "SSE": "上海证券交易所", "BSE": "北京证券交易所"}
-            return [
-                {"code": row.exchange,
-                 "name": name_map.get(row.exchange, row.exchange),
-                 "count": row.count}
-                for row in result.fetchall()
-            ]
-        finally:
-            conn.close()
+        return self._market.exchanges()
 
     def get_symbols_by_filter(
         self,
@@ -278,72 +117,8 @@ class DataService:
         limit: int = 500,
     ) -> List[Dict[str, Any]]:
         """Get symbols filtered by industry and/or exchange (exchange derived from ts_code suffix)."""
-        conn = get_tushare_connection()
-        try:
-            query = """
-                SELECT ts_code, name, industry
-                FROM stock_basic
-                WHERE 1=1
-            """
-            params: Dict[str, Any] = {}
-
-            if industry:
-                query += " AND industry = :industry"
-                params["industry"] = industry
-
-            if exchange:
-                query += " AND exchange = :exchange"
-                params["exchange"] = exchange.upper()
-
-            query += " ORDER BY ts_code LIMIT :limit"
-            params["limit"] = limit
-
-            rows = conn.execute(text(query), params).fetchall()
-            exchange_map = {"SZ": "SZSE", "SH": "SSE", "BJ": "BSE"}
-            symbols = []
-            for row in rows:
-                ts_code = row.ts_code
-                code = ts_code.split(".")[0]
-                suffix = ts_code.split(".")[1] if "." in ts_code else "SZ"
-                vt_exchange = exchange_map.get(suffix, suffix)
-                symbols.append({
-                    "ts_code": ts_code,
-                    "symbol": code,
-                    "name": row.name,
-                    "exchange": vt_exchange,
-                    "vt_symbol": f"{code}.{vt_exchange}",
-                    "industry": row.industry,
-                })
-            return symbols
-        finally:
-            conn.close()
+        return self._market.symbols_by_filter(industry=industry, exchange=exchange, limit=limit)
 
     def get_indexes(self) -> List[Dict[str, str]]:
         """Return available index codes from akshare.index_daily with friendly labels."""
-        conn = get_akshare_connection()
-        try:
-            result = conn.execute(text("SELECT DISTINCT index_code FROM index_daily ORDER BY index_code"))
-            rows = result.fetchall()
-            # Friendly mapping for common indexes
-            name_map = {
-                '399300.SZ': 'HS300 (沪深300)',
-                '000300.SH': 'HS300 (沪深300)',
-                '000016.SH': 'SSE50 (上证50)',
-                '000905.SH': 'CSI500 (中证500)',
-                '399006.SZ': 'ChiNext (创业板指)',
-                '000001.SH': 'SSE Composite (上证综指)',
-                '399001.SZ': 'SZSE Component (深证成指)',
-                '000852.SH': 'CSI1000 (中证1000)',
-                '000688.SH': 'STAR Market (科创板)',
-                '399005.SZ': 'Small/Mid Cap Index (中小板指)'
-            }
-
-            indexes = []
-            for row in rows:
-                code = row.index_code
-                label = name_map.get(code, code)
-                indexes.append({"value": code, "label": label})
-
-            return indexes
-        finally:
-            conn.close()
+        return MarketService().list_benchmark_indexes()
