@@ -5,7 +5,7 @@ All SQL touching `tushare.sync_log` lives here.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from app.infrastructure.db.connections import connection
@@ -30,13 +30,21 @@ class SyncLogDao:
                     {"ep": ep},
                 ).fetchone()
                 if row:
+                    def _to_utc_iso(dt: datetime | None) -> str | None:
+                        if not dt:
+                            return None
+                        # If naive, assume stored as UTC; make it aware
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        return dt.astimezone(timezone.utc).isoformat()
+
                     latest[ep] = {
                         "sync_date": row[0].isoformat() if row[0] else None,
                         "status": row[1],
                         "rows_synced": row[2] or 0,
                         "error_message": row[3],
-                        "started_at": row[4].isoformat() if row[4] else None,
-                        "finished_at": row[5].isoformat() if row[5] else None,
+                        "started_at": _to_utc_iso(row[4]),
+                        "finished_at": _to_utc_iso(row[5]),
                     }
                 else:
                     latest[ep] = {
@@ -55,7 +63,15 @@ class SyncLogDao:
             row = conn.execute(text("SELECT MAX(finished_at) as max_finished FROM sync_log")).fetchone()
             if not row:
                 return None
-            return row.max_finished if hasattr(row, "max_finished") else row[0]
+            val = row.max_finished if hasattr(row, "max_finished") else row[0]
+            if val is None:
+                return None
+            # ensure timezone-aware UTC datetime
+            if val.tzinfo is None:
+                val = val.replace(tzinfo=timezone.utc)
+            else:
+                val = val.astimezone(timezone.utc)
+            return val
 
     def running_count_last_day(self) -> int:
         with connection("tushare") as conn:
