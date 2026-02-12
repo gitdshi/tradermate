@@ -51,6 +51,36 @@ tradermate/
 
 For a detailed directory map and API routes, see [API_README.md](API_README.md) and [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
 
+## Current Status (2026-02-12)
+
+- Canonical service implementations moved into `service/` subpackages:
+	- `app/datasync/service/` — Data ingestion and sync daemons (Tushare/AkShare helpers).
+	- `app/worker/service/` — Worker tasks and run logic.
+	- Package roots (`app/datasync/`, `app/worker/`) now contain minimal `main.py` entrypoints only.
+- Infrastructure centralized under `app/infrastructure/` (`config/`, `logging/`, `db/`).
+- Operational scripts renamed and standardized to `*_service.sh` and located in `tradermate/scripts/`:
+	- `api_service.sh`, `worker_service.sh`, `datasync_service.sh` (backend)
+	- `tradermate-portal/scripts/portal_service.sh` (frontend)
+	- Logs and PID files are written to `tradermate/logs/` and `tradermate-portal/logs/` respectively.
+- `.vite` cache is ignored in `tradermate-portal/.gitignore` and has been removed from the workspace.
+- Contributor/operations principle added: read `docs/OPERATIONS_GUIDE.md` before creating or moving code; use service scripts to manage long-running processes.
+
+### Quick service commands
+
+Backend (from `tradermate/`):
+```
+./scripts/api_service.sh start|stop|restart|status
+./scripts/worker_service.sh start|stop|restart|status [queues...]
+./scripts/datasync_service.sh start|stop|restart|status
+```
+
+Frontend (from `tradermate-portal/`):
+```
+./scripts/portal_service.sh start|stop|restart|status
+```
+
+If you modify worker task code, always restart the worker using the scripts above to avoid stale imports.
+
 ## Contributing & Support
 
 Please follow the contributing steps in `IMPLEMENTATION_STATUS.md` and include tests for new features. If you have questions, open an issue in the repository.
