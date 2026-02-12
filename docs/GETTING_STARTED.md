@@ -26,9 +26,10 @@ docker-compose up -d mysql
 
 ```bash
 pip install -r requirements.txt
-python -m app.main
-# Or use the API startup script
-./scripts/start_api.sh
+# Use the lifecycle script to run the API (ensures venv and logs)
+./scripts/api_service.sh start|stop|restart|status
+# For quick manual debugging only:
+python -m uvicorn app.api.main:app --reload
 ```
 
 ## Frontend
@@ -38,7 +39,8 @@ python -m app.main
 ```bash
 cd tradermate-portal
 npm install
-npm run dev
+# Use the lifecycle script for the frontend dev server:
+./scripts/portal_service.sh start|stop|restart|status
 ```
 
 2. The frontend runs at http://localhost:5173 and expects the backend at http://localhost:8000 by default.

@@ -81,10 +81,10 @@ Fetch stock list and historical data from Tushare:
 export TUSHARE_TOKEN=your_token_here
 
 # Ingest stock basic info
-INGEST_STOCK_BASIC=1 python app/services/tushare_ingest.py
+INGEST_STOCK_BASIC=1 python app/datasync/service/tushare_ingest.py
 
 # Ingest all daily data
-INGEST_ALL_DAILY=1 python app/services/tushare_ingest.py
+INGEST_ALL_DAILY=1 python app/datasync/service/tushare_ingest.py
 ```
 
 ### 2. Sync to vnpy
@@ -104,18 +104,24 @@ python app/scripts/import_tushare_to_vnpy.py --all --full-refresh
 
 ### 3. Daily Sync Daemon
 
-Run automated daily sync:
+Run automated daily sync using the canonical datasync service and lifecycle script:
 
 ```bash
-# Run once
-python app/services/data_sync_daemon.py --once
+# Use the lifecycle script (recommended)
+cd /Users/mac/Workspace/Projects/TraderMate/tradermate
+./scripts/datasync_service.sh start|stop|restart|status
 
-# Run as daemon (scheduled at 18:00 daily)
-python app/services/data_sync_daemon.py --daemon
+# Or run once (for quick manual operations)
+.venv/bin/python3 app/datasync/service/data_sync_daemon.py --once
+
+# Run as daemon (manual)
+.venv/bin/python3 app/datasync/service/data_sync_daemon.py --daemon
 
 # Sync to vnpy only (no Tushare fetch)
-python app/services/data_sync_daemon.py --sync-vnpy
+.venv/bin/python3 app/datasync/service/data_sync_daemon.py --sync-vnpy
 ```
+
+Developer note: after editing datasync modules, restart the datasync service via the lifecycle script to ensure the updated code is loaded.
 
 ### 4. vnpy Configuration
 

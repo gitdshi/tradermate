@@ -27,7 +27,7 @@ docker-compose up -d mysql
 3. **Run the API server:**
 ```bash
 # Using the startup script
-./scripts/start_api.sh
+./scripts/api_service.sh start|stop|restart|status
 
 # Or manually
 python -m uvicorn app.api.main:app --reload
@@ -118,6 +118,8 @@ app/api/
     ├── data_service.py # Market data service
     ├── backtest_service.py  # Backtest execution
     └── strategy_service.py  # Strategy validation
+
+> Note: Several service implementations have been reorganized into canonical `service/` subpackages (e.g. `app/datasync/service`, `app/worker/service`). For running and managing long-lived processes (API, worker, datasync), use the lifecycle scripts in `tradermate/scripts/` (e.g. `api_service.sh`, `worker_service.sh`, `datasync_service.sh`).
 ```
 
 ## Testing

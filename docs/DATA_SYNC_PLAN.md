@@ -276,3 +276,15 @@ mysql -u root -p vnpy -e "SELECT COUNT(*) FROM dbbardata WHERE DATE(datetime) = 
 - Backup databases
 - Review API usage and costs
 - Update documentation
+
+## Operational Notes (moved code & service scripts)
+
+- Implementation locations: canonical datasync code now lives under `app/datasync/service/` (examples: `app/datasync/service/data_sync_daemon.py`, `app/datasync/service/tushare_ingest.py`, `app/datasync/service/akshare_ingest.py`). Package-root `app/datasync/main.py` is a minimal entrypoint.
+- Runtime: use the prepared lifecycle script to run the daemon and ensure the virtualenv, logging, and PID handling are correct:
+
+```bash
+cd /Users/mac/Workspace/Projects/TraderMate/tradermate
+./scripts/datasync_service.sh start|stop|restart|status
+```
+
+- Developer note: after editing any datasync module, restart the daemon using the lifecycle script to ensure the process loads the updated code (no auto-reload for the daemon).

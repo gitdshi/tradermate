@@ -23,4 +23,11 @@ npm run test:coverage
 npm run test:e2e
 ```
 
+Developer note: if you modify worker task code (backend `app/worker/service/*`), restart the RQ worker using the lifecycle script to ensure the new code is loaded:
+
+```bash
+cd /Users/mac/Workspace/Projects/TraderMate/tradermate
+./scripts/worker_service.sh restart
+```
+
 For full testing guidance and examples, open `docs/frontend/TEST_SUMMARY.md` and `docs/frontend/E2E_README.md`.
