@@ -1,11 +1,11 @@
-"""Sync domain service."""
+"""Sync domain service (moved to extdata)."""
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
-from app.domains.sync.dao.sync_log_dao import SyncLogDao
+from app.domains.extdata.dao.sync_log_dao import SyncLogDao
 from app.datasync.service.data_sync_daemon import (
     DataSyncDaemon,
     BACKFILL_DAYS,

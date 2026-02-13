@@ -19,11 +19,8 @@ from typing import List, Optional
 # Add project root to path
 sys.path.insert(0, str(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))) )
 
-from sqlalchemy import create_engine, text
-
-# Database URLs
-TUSHARE_DB_URL = os.getenv('TUSHARE_DATABASE_URL', 'mysql+pymysql://root:password@127.0.0.1/tushare?charset=utf8mb4')
-VNPY_DB_URL = os.getenv('VNPY_DATABASE_URL', 'mysql+pymysql://root:password@127.0.0.1/vnpy?charset=utf8mb4')
+from sqlalchemy import text
+from app.infrastructure.db.connections import get_tushare_engine, get_vnpy_engine
 
 # Exchange mapping
 EXCHANGE_MAP = {
@@ -185,12 +182,18 @@ def main():
         print("Please specify --symbol or --all")
         return
     
-    # Create engines
-    tushare_engine = create_engine(TUSHARE_DB_URL, pool_pre_ping=True)
-    vnpy_engine = create_engine(VNPY_DB_URL, pool_pre_ping=True)
+    # Create engines via infrastructure connections
+    tushare_engine = get_tushare_engine()
+    vnpy_engine = get_vnpy_engine()
     
-    print(f"Tushare DB: {TUSHARE_DB_URL.split('@')[1] if '@' in TUSHARE_DB_URL else TUSHARE_DB_URL}")
-    print(f"VNPY DB: {VNPY_DB_URL.split('@')[1] if '@' in VNPY_DB_URL else VNPY_DB_URL}")
+    try:
+        print(f"Tushare DB: {tushare_engine.url}")
+    except Exception:
+        pass
+    try:
+        print(f"VNPY DB: {vnpy_engine.url}")
+    except Exception:
+        pass
     
     total_bars = 0
     total_symbols = 0

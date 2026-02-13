@@ -63,6 +63,15 @@ CREATE TABLE IF NOT EXISTS index_daily (
     INDEX idx_index_date (trade_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- Trade calendar table - persisted from AkShare tool_trade_date_hist_sina
+CREATE TABLE IF NOT EXISTS trade_cal (
+    trade_date DATE NOT NULL PRIMARY KEY,
+    is_trade_day TINYINT NOT NULL DEFAULT 1,
+    source VARCHAR(32) DEFAULT 'akshare',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_trade_date (trade_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Trade calendar from AkShare, refreshed monthly';
+
 -- Sync log for tracking data sync to tushare DB
 CREATE TABLE IF NOT EXISTS sync_log (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,

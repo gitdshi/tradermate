@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends
 from app.api.services.auth_service import get_current_user
 from app.api.models.user import TokenData
 
-from app.domains.sync.service import SyncStatusService
+from app.domains.extdata.service import SyncStatusService
 
 router = APIRouter(prefix="/system", tags=["system"])
 

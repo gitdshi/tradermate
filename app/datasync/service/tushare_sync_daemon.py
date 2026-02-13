@@ -13,9 +13,11 @@ from datetime import datetime, timedelta, date
 
 import pandas as pd
 
-from sqlalchemy import text
-
 from app.datasync.service import tushare_ingest as ti
+from app.domains.extdata.dao.sync_log_dao import (
+    write_tushare_stock_sync_log as dao_write_tushare_stock_sync_log,
+    get_last_success_tushare_sync_date as dao_get_last_success_tushare_sync_date,
+)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -65,26 +67,11 @@ def write_sync_log(sync_date: date, endpoint: str, status: str, rows: int = 0, e
     if DRY_RUN:
         logging.info('DRY RUN - skip writing sync log: %s %s %s', sync_date, endpoint, status)
         return
-    with ENGINE.begin() as conn:
-        sql = text(
-            "INSERT INTO tushare_stock_sync_log (sync_date, endpoint, status, rows_synced, error_message, started_at, finished_at)"
-            " VALUES (:sd, :ep, :st, :rows, :err, NOW(), NOW())"
-            " ON DUPLICATE KEY UPDATE status=VALUES(status), rows_synced=VALUES(rows_synced), error_message=VALUES(error_message), finished_at=NOW()"
-        )
-        conn.execute(sql, {
-            'sd': sync_date.strftime('%Y-%m-%d'),
-            'ep': endpoint,
-            'st': status,
-            'rows': rows,
-            'err': err
-        })
+    dao_write_tushare_stock_sync_log(sync_date, endpoint, status, rows, err)
 
 
 def get_last_success_date(endpoint: str):
-    with ENGINE.connect() as conn:
-        res = conn.execute(text("SELECT MAX(sync_date) FROM tushare_stock_sync_log WHERE endpoint=:ep AND status='success'"), {'ep': endpoint})
-        row = res.fetchone()
-        return row[0] if row and row[0] else None
+    return dao_get_last_success_tushare_sync_date(endpoint)
 
 
 def sync_daily_for_date(d: date):

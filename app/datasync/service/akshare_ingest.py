@@ -17,17 +17,13 @@ import logging
 import pandas as pd
 import akshare as ak
 from datetime import datetime, timedelta
-from sqlalchemy import create_engine, text
 from typing import Optional, List
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Database URL
-AKSHARE_DB_URL = os.getenv('AKSHARE_DATABASE_URL', 'mysql+pymysql://root:password@127.0.0.1:3306/akshare?charset=utf8mb4')
-
-# Create engine
-akshare_engine = create_engine(AKSHARE_DB_URL, pool_pre_ping=True)
+# Engine is provided by the akshare DAO (DB URL moved to infrastructure.connections)
+from app.domains.extdata.dao.akshare_dao import engine as akshare_engine  # type: ignore
 
 # Rate limiting
 DEFAULT_CALLS_PER_MIN = int(os.getenv('AKSHARE_CALLS_PER_MIN', '30'))
@@ -135,23 +131,11 @@ def set_metrics_hook(fn):
     call_ak._metrics_hook = fn
 
 
-def audit_start(api_name: str, params: dict) -> int:
-    """Start an audit record for an ingestion operation."""
-    import json
-    with akshare_engine.begin() as conn:
-        result = conn.execute(text(
-            "INSERT INTO ingest_audit (api_name, params, status, fetched_rows) "
-            "VALUES (:api, :params, 'running', 0)"
-        ), {"api": api_name, "params": json.dumps(params)})
-        return result.lastrowid
-
-
-def audit_finish(audit_id: int, status: str, rows: int):
-    """Finish an audit record."""
-    with akshare_engine.begin() as conn:
-        conn.execute(text(
-            "UPDATE ingest_audit SET status=:status, fetched_rows=:rows, finished_at=NOW() WHERE id=:id"
-        ), {"status": status, "rows": rows, "id": audit_id})
+from app.domains.extdata.dao.akshare_dao import (
+    audit_start,
+    audit_finish,
+    upsert_index_daily_rows,
+)
 
 
 # ============================================================================
@@ -213,33 +197,24 @@ def ingest_index_daily(symbol: str = 'sh000300', start_date: str = None) -> int:
         # Convert trade_date to string for SQL
         df['trade_date'] = df['trade_date'].astype(str)
         
-        # Upsert to database
-        rows = 0
-        upsert_sql = text("""
-            INSERT INTO index_daily (index_code, trade_date, open, high, low, close, volume, amount)
-            VALUES (:index_code, :trade_date, :open, :high, :low, :close, :volume, :amount)
-            ON DUPLICATE KEY UPDATE 
-                open=VALUES(open), high=VALUES(high), low=VALUES(low), 
-                close=VALUES(close), volume=VALUES(volume), amount=VALUES(amount)
-        """)
-        
-        with akshare_engine.begin() as conn:
-            for _, row in df.iterrows():
-                conn.execute(upsert_sql, {
-                    'index_code': index_code,
-                    'trade_date': str(row['trade_date'])[:10],
-                    'open': float(row['open']) if pd.notna(row['open']) else None,
-                    'high': float(row['high']) if pd.notna(row['high']) else None,
-                    'low': float(row['low']) if pd.notna(row['low']) else None,
-                    'close': float(row['close']) if pd.notna(row['close']) else None,
-                    'volume': int(row['volume']) if pd.notna(row['volume']) else None,
-                    'amount': None  # AkShare doesn't provide amount for indexes
-                })
-                rows += 1
-        
-        logger.info(f"Ingested {rows} rows for index {index_code}")
-        audit_finish(audit_id, 'success', rows)
-        return rows
+        # Prepare rows and delegate upsert to DAO
+        rows = []
+        for _, row in df.iterrows():
+            rows.append({
+                'index_code': index_code,
+                'trade_date': str(row['trade_date'])[:10],
+                'open': float(row['open']) if pd.notna(row['open']) else None,
+                'high': float(row['high']) if pd.notna(row['high']) else None,
+                'low': float(row['low']) if pd.notna(row['low']) else None,
+                'close': float(row['close']) if pd.notna(row['close']) else None,
+                'volume': int(row['volume']) if pd.notna(row['volume']) else None,
+                'amount': None
+            })
+
+        inserted = upsert_index_daily_rows(rows)
+        logger.info('Ingested %d rows for index %s', inserted, index_code)
+        audit_finish(audit_id, 'success', inserted)
+        return inserted
         
     except Exception as e:
         logger.exception(f"Error ingesting index {symbol}: {e}")

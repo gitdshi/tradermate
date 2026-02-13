@@ -29,8 +29,7 @@ from zoneinfo import ZoneInfo
 from typing import List, Optional, Tuple, Dict
 
 import pandas as pd
-from sqlalchemy import create_engine, text
-from sqlalchemy.engine import Engine
+# SQLAlchemy engines are provided by DAO modules; avoid importing SQLAlchemy here
 
 # Add project root to path
 sys.path.insert(0, str(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
@@ -42,15 +41,41 @@ from app.datasync.service.tushare_ingest import (
     ingest_adj_factor,
     ingest_dividend,
     ingest_top10_holders,
+    ingest_dividend_by_date_range,
+    ingest_top10_holders_by_date_range,
+    ingest_adj_factor_by_date_range,
     get_all_ts_codes,
     get_max_trade_date,
     call_pro,
-    engine as tushare_engine,
     pro
 )
 from app.datasync.service.akshare_ingest import (
     ingest_index_daily as ak_ingest_index_daily,
-    akshare_engine
+)
+
+# DAO imports to replace raw SQL
+from app.domains.extdata.dao.sync_log_dao import (
+    write_sync_log as dao_write_sync_log,
+    get_sync_status as dao_get_sync_status,
+    find_failed_syncs as dao_find_failed_syncs,
+)
+from app.domains.extdata.dao.tushare_dao import engine as tushare_engine  # use DAO engine
+from app.domains.extdata.dao.akshare_dao import engine as akshare_engine  # use DAO engine
+from app.domains.extdata.dao.vnpy_dao import engine as vnpy_engine  # use DAO engine
+from app.domains.extdata.dao.data_sync_status_dao import text
+from app.domains.extdata.dao.data_sync_status_dao import (
+    get_index_daily_count_for_date,
+    get_stock_basic_count,
+    get_adj_factor_count_for_date,
+    get_stock_daily_ts_codes_for_date
+)
+from app.domains.extdata.dao.tushare_dao import fetch_stock_daily_rows
+from app.domains.extdata.dao.vnpy_dao import (
+    get_last_sync_date as dao_get_last_sync_date,
+    update_sync_status as dao_update_sync_status,
+    bulk_upsert_dbbardata as dao_bulk_upsert_dbbardata,
+    get_bar_stats as dao_get_bar_stats,
+    upsert_dbbaroverview as dao_upsert_dbbaroverview,
 )
 
 # Import AkShare for trade calendar fallback
@@ -61,13 +86,19 @@ except ImportError:
     AKSHARE_AVAILABLE = False
     ak = None
 
+# Import refactored sync coordinator
+from app.datasync.service.sync_coordinator import (
+    daily_ingest,
+    missing_data_backfill,
+    initialize_sync_status_table,
+    refresh_trade_calendar
+)
+
 from app.infrastructure.logging import configure_logging, get_logger  # noqa: E402
 configure_logging()
 logger = get_logger(__name__)
 
-# Database URLs
-TUSHARE_DB_URL = os.getenv('TUSHARE_DATABASE_URL', 'mysql+pymysql://root:password@127.0.0.1/tushare?charset=utf8mb4')
-VNPY_DB_URL = os.getenv('VNPY_DATABASE_URL', 'mysql+pymysql://root:password@127.0.0.1/vnpy?charset=utf8mb4')
+# Database URLs are provided via infrastructure connections/DAOs
 
 # Sync configuration
 SYNC_HOUR = int(os.getenv('SYNC_HOUR', '2'))  # Default: 02:00 local time
@@ -95,15 +126,16 @@ class DataSyncDaemon:
     """Daemon for syncing data between Tushare and vnpy databases."""
     
     def __init__(self):
-        self.tushare_engine: Engine = create_engine(TUSHARE_DB_URL, pool_pre_ping=True)
-        self.vnpy_engine: Engine = create_engine(VNPY_DB_URL, pool_pre_ping=True)
+        # Use DAO-provided engines instead of creating engines in service layer
+        self.tushare_engine = tushare_engine
+        self.vnpy_engine = vnpy_engine
         self.running = False
 
     # =========================================================================
     # Audit helpers
     # =========================================================================
 
-    def _table_exists(self, engine: Engine, table_name: str) -> bool:
+    def _table_exists(self, engine, table_name: str) -> bool:
         db_name = engine.url.database
         if not db_name:
             return False
@@ -137,30 +169,10 @@ class DataSyncDaemon:
     def write_sync_log(self, sync_date: date, endpoint: str, status: str,
                        rows_synced: int = 0, error: Optional[str] = None):
         """Write to tushare.sync_log for centralized audit."""
-        with self.tushare_engine.begin() as conn:
-            conn.execute(text("""
-                INSERT INTO sync_log (sync_date, endpoint, status, rows_synced, error_message, started_at, finished_at)
-                VALUES (:sync_date, :endpoint, :status, :rows_synced, :error_message, NOW(), NOW())
-                ON DUPLICATE KEY UPDATE
-                    status = VALUES(status),
-                    rows_synced = VALUES(rows_synced),
-                    error_message = VALUES(error_message),
-                    finished_at = NOW()
-            """), {
-                'sync_date': sync_date,
-                'endpoint': endpoint,
-                'status': status,
-                'rows_synced': rows_synced,
-                'error_message': error
-            })
+        dao_write_sync_log(sync_date, endpoint, status, rows_synced=rows_synced, error_message=error)
 
     def get_sync_status(self, sync_date: date, endpoint: str) -> Optional[str]:
-        with self.tushare_engine.connect() as conn:
-            res = conn.execute(text(
-                "SELECT status FROM sync_log WHERE sync_date=:d AND endpoint=:ep"
-            ), {'d': sync_date, 'ep': endpoint})
-            row = res.fetchone()
-            return row[0] if row else None
+        return dao_get_sync_status(sync_date, endpoint)
 
     # =========================================================================
     # Trade calendar helpers
@@ -262,17 +274,7 @@ class DataSyncDaemon:
         """
         end = date.today() - timedelta(days=1)
         start = end - timedelta(days=max_age_days)
-        
-        with self.tushare_engine.connect() as conn:
-            res = conn.execute(text("""
-                SELECT sync_date, endpoint 
-                FROM sync_log 
-                WHERE sync_date >= :start AND sync_date <= :end
-                  AND status IN ('error', 'partial')
-                ORDER BY sync_date ASC, endpoint
-            """), {'start': start, 'end': end})
-            failures = [(row[0], row[1]) for row in res.fetchall()]
-        
+        failures = dao_find_failed_syncs(start, end)
         if failures:
             logger.info("Found %d failed/partial syncs in last %d days", len(failures), max_age_days)
         return failures
@@ -363,10 +365,8 @@ class DataSyncDaemon:
             try:
                 # We no longer sync AkShare index data into Tushare. Instead,
                 # report success if AkShare has index_daily rows for the date.
-                with akshare_engine.connect() as conn:
-                    res = conn.execute(text("SELECT COUNT(1) as cnt FROM index_daily WHERE trade_date = :d"), {'d': start_date})
-                    row = res.fetchone()
-                    cnt = row[0] if row else 0
+                # Use DAO helper to count index_daily rows for date
+                cnt = get_index_daily_count_for_date(start_date)
                 return 'success', int(cnt or 0), None
             except Exception as exc:
                 last_error = str(exc)
@@ -391,9 +391,7 @@ class DataSyncDaemon:
         logger.info("[Tushare %s] Step 1/5: Refreshing stock_basic...", target)
         try:
             ingest_stock_basic()
-            with self.tushare_engine.connect() as conn:
-                res = conn.execute(text("SELECT COUNT(*) FROM stock_basic"))
-                count = res.fetchone()[0]
+            count = get_stock_basic_count()
             logger.info("[Tushare %s] stock_basic refreshed: %d stocks", target, count)
         except Exception as exc:
             err_msg = str(exc)
@@ -441,9 +439,7 @@ class DataSyncDaemon:
             attempt += 1
             try:
                 ingest_adj_factor(trade_date=target)
-                with self.tushare_engine.connect() as conn:
-                    res = conn.execute(text("SELECT COUNT(*) FROM adj_factor WHERE trade_date = :d"), {'d': sync_date})
-                    count = res.fetchone()[0]
+                count = get_adj_factor_count_for_date(sync_date)
                 total_rows += count
                 logger.info("[Tushare %s] adj_factor ingested: %d rows", target, count)
                 break
@@ -463,16 +459,25 @@ class DataSyncDaemon:
         # Step 4: Ingest dividend data (may require higher permissions)
         logger.info("[Tushare %s] Step 4/5: Ingesting stock_dividend...", target)
         try:
-            # Get active stocks and attempt dividend ingestion
-            ts_codes = get_all_ts_codes()
-            div_count = 0
-            for code in ts_codes[:100]:  # Sample first 100 stocks to avoid rate limits
+                # Prefer range-based ingest which performs a DB-diff and inserts only missing rows.
+                # This is more efficient and avoids repeated per-symbol calls.
+                s = sync_date.strftime('%Y-%m-%d')
+                e = s
                 try:
-                    ingest_dividend(ts_code=code)
-                    div_count += 1
-                except Exception:
-                    pass
-            logger.info("[Tushare %s] stock_dividend sampled: %d stocks checked", target, div_count)
+                    ingest_dividend_by_date_range(s, e, batch_size=BATCH_SIZE)
+                    logger.info("[Tushare %s] stock_dividend range ingest submitted for %s", target, s)
+                except Exception as exc_inner:
+                    logger.warning("[Tushare %s] stock_dividend range ingest failed, falling back to sample: %s", target, exc_inner)
+                    # Fallback to lightweight sampling to avoid total failure
+                    ts_codes = get_all_ts_codes()
+                    div_count = 0
+                    for code in ts_codes[:100]:  # Sample first 100 stocks to avoid rate limits
+                        try:
+                            ingest_dividend(ts_code=code)
+                            div_count += 1
+                        except Exception:
+                            pass
+                    logger.info("[Tushare %s] stock_dividend sampled: %d stocks checked", target, div_count)
         except Exception as exc:
             err_msg = str(exc)
             if '没有接口访问权限' in err_msg or 'permission' in err_msg.lower():
@@ -485,16 +490,22 @@ class DataSyncDaemon:
         # Step 5: Ingest top10_holders (may require higher permissions)
         logger.info("[Tushare %s] Step 5/5: Ingesting top10_holders...", target)
         try:
-            # Get active stocks and attempt top10_holders ingestion
-            ts_codes = get_all_ts_codes()
-            holder_count = 0
-            for code in ts_codes[:50]:  # Sample first 50 stocks to avoid rate limits
+                s = sync_date.strftime('%Y-%m-%d')
+                e = s
                 try:
-                    ingest_top10_holders(ts_code=code)
-                    holder_count += 1
-                except Exception:
-                    pass
-            logger.info("[Tushare %s] top10_holders sampled: %d stocks checked", target, holder_count)
+                    ingest_top10_holders_by_date_range(s, e, batch_size=BATCH_SIZE)
+                    logger.info("[Tushare %s] top10_holders range ingest submitted for %s", target, s)
+                except Exception as exc_inner:
+                    logger.warning("[Tushare %s] top10_holders range ingest failed, falling back to sample: %s", target, exc_inner)
+                    ts_codes = get_all_ts_codes()
+                    holder_count = 0
+                    for code in ts_codes[:50]:  # Sample first 50 stocks to avoid rate limits
+                        try:
+                            ingest_top10_holders(ts_code=code)
+                            holder_count += 1
+                        except Exception:
+                            pass
+                    logger.info("[Tushare %s] top10_holders sampled: %d stocks checked", target, holder_count)
         except Exception as exc:
             err_msg = str(exc)
             if '没有接口访问权限' in err_msg or 'permission' in err_msg.lower():
@@ -543,15 +554,8 @@ class DataSyncDaemon:
         while attempt < MAX_RETRIES:
             attempt += 1
             try:
-                # Get all ts_codes from tushare stock_daily for this date
-                with self.tushare_engine.connect() as conn:
-                    res = conn.execute(text("""
-                        SELECT DISTINCT ts_code 
-                        FROM stock_daily 
-                        WHERE trade_date = :d
-                        ORDER BY ts_code
-                    """), {'d': sync_date})
-                    ts_codes = [row[0] for row in res.fetchall()]
+                # Get all ts_codes from tushare stock_daily for this date (via DAO)
+                ts_codes = get_stock_daily_ts_codes_for_date(sync_date)
                 
                 if not ts_codes:
                     logger.warning("[VNPy %s] No data found in stock_daily for this date", sync_date)
@@ -652,32 +656,12 @@ class DataSyncDaemon:
     
     def get_last_sync_date(self, symbol: str, exchange: str, interval: str = 'd') -> Optional[date]:
         """Get the last synced date for a symbol from vnpy_data."""
-        with self.vnpy_engine.connect() as conn:
-            result = conn.execute(text("""
-                SELECT last_sync_date FROM sync_status 
-                WHERE symbol = :symbol AND exchange = :exchange AND `interval` = :interval
-            """), {'symbol': symbol, 'exchange': exchange, 'interval': interval})
-            row = result.fetchone()
-            return row[0] if row else None
+        return dao_get_last_sync_date(symbol, exchange, interval)
     
     def update_sync_status(self, symbol: str, exchange: str, interval: str, 
                            sync_date: date, count: int):
         """Update sync status for a symbol."""
-        with self.vnpy_engine.begin() as conn:
-            conn.execute(text("""
-                INSERT INTO sync_status (symbol, exchange, `interval`, last_sync_date, last_sync_count)
-                VALUES (:symbol, :exchange, :interval, :sync_date, :count)
-                ON DUPLICATE KEY UPDATE 
-                    last_sync_date = VALUES(last_sync_date),
-                    last_sync_count = VALUES(last_sync_count),
-                    updated_at = CURRENT_TIMESTAMP
-            """), {
-                'symbol': symbol,
-                'exchange': exchange,
-                'interval': interval,
-                'sync_date': sync_date,
-                'count': count
-            })
+        dao_update_sync_status(symbol, exchange, interval, sync_date, count)
     
     def sync_symbol_to_vnpy(self, ts_code: str, start_date: Optional[date] = None) -> int:
         """
@@ -713,58 +697,44 @@ class DataSyncDaemon:
             params['start_date'] = start_date
         
         query += " ORDER BY trade_date ASC"
-        
-        with self.tushare_engine.connect() as conn:
-            result = conn.execute(text(query), params)
-            rows = result.fetchall()
+
+        # Fetch rows via DAO to centralize SQL
+        rows = fetch_stock_daily_rows(ts_code, start_date)
         
         if not rows:
             logger.debug(f"No new data to sync for {ts_code}")
             return 0
         
-        # Insert into vnpy_data.dbbardata
-        insert_sql = text("""
-            INSERT INTO dbbardata 
-                (symbol, exchange, `datetime`, `interval`, volume, turnover, 
-                 open_interest, open_price, high_price, low_price, close_price)
-            VALUES 
-                (:symbol, :exchange, :datetime, :interval, :volume, :turnover,
-                 :open_interest, :open_price, :high_price, :low_price, :close_price)
-            ON DUPLICATE KEY UPDATE
-                volume = VALUES(volume),
-                turnover = VALUES(turnover),
-                open_price = VALUES(open_price),
-                high_price = VALUES(high_price),
-                low_price = VALUES(low_price),
-                close_price = VALUES(close_price)
-        """)
-        
+        # Bulk prepare rows for vnpy dbbardata upsert via DAO
         synced = 0
         last_date = None
         
-        with self.vnpy_engine.begin() as conn:
-            for row in rows:
-                trade_date = row[0]
-                if isinstance(trade_date, str):
-                    dt = datetime.strptime(trade_date, '%Y-%m-%d')
-                else:
-                    dt = datetime.combine(trade_date, datetime.min.time())
-                
-                conn.execute(insert_sql, {
-                    'symbol': symbol,
-                    'exchange': exchange,
-                    'datetime': dt,
-                    'interval': interval,
-                    'volume': float(row[4]) if row[4] else 0.0,
-                    'turnover': float(row[5]) if row[5] else 0.0,
-                    'open_interest': 0.0,
-                    'open_price': float(row[1]) if row[1] else 0.0,
-                    'high_price': float(row[2]) if row[2] else 0.0,
-                    'low_price': float(row[3]) if row[3] else 0.0,
-                    'close_price': float(row[4]) if row[4] else 0.0,  # Fixed: was row[4] should be close
-                })
-                synced += 1
-                last_date = trade_date
+        # Prepare rows for bulk insert into vnpy dbbardata
+        to_insert = []
+        for row in rows:
+            trade_date = row[0]
+            if isinstance(trade_date, str):
+                dt = datetime.strptime(trade_date, '%Y-%m-%d')
+            else:
+                dt = datetime.combine(trade_date, datetime.min.time())
+            to_insert.append({
+                'symbol': symbol,
+                'exchange': exchange,
+                'datetime': dt,
+                'interval': interval,
+                'volume': float(row[4]) if row[4] else 0.0,
+                'turnover': float(row[5]) if row[5] else 0.0,
+                'open_interest': 0.0,
+                'open_price': float(row[1]) if row[1] else 0.0,
+                'high_price': float(row[2]) if row[2] else 0.0,
+                'low_price': float(row[3]) if row[3] else 0.0,
+                'close_price': float(row[4]) if row[4] else 0.0,
+            })
+            synced += 1
+            last_date = trade_date
+
+        # Bulk upsert into vnpy dbbardata via DAO
+        dao_bulk_upsert_dbbardata(to_insert)
         
         # Update sync status
         if last_date:
@@ -776,31 +746,10 @@ class DataSyncDaemon:
     
     def update_bar_overview(self, symbol: str, exchange: str, interval: str = 'd'):
         """Update the bar overview for a symbol after sync."""
-        with self.vnpy_engine.begin() as conn:
-            # Get bar statistics
-            result = conn.execute(text("""
-                SELECT COUNT(*), MIN(`datetime`), MAX(`datetime`)
-                FROM dbbardata
-                WHERE symbol = :symbol AND exchange = :exchange AND `interval` = :interval
-            """), {'symbol': symbol, 'exchange': exchange, 'interval': interval})
-            row = result.fetchone()
-            
-            if row and row[0] > 0:
-                conn.execute(text("""
-                    INSERT INTO dbbaroverview (symbol, exchange, `interval`, count, start, end)
-                    VALUES (:symbol, :exchange, :interval, :count, :start, :end)
-                    ON DUPLICATE KEY UPDATE
-                        count = VALUES(count),
-                        start = VALUES(start),
-                        end = VALUES(end)
-                """), {
-                    'symbol': symbol,
-                    'exchange': exchange,
-                    'interval': interval,
-                    'count': row[0],
-                    'start': row[1],
-                    'end': row[2]
-                })
+        # Use DAO to compute bar stats and upsert overview
+        cnt, start_dt, end_dt = dao_get_bar_stats(symbol, exchange, interval)
+        if cnt and cnt > 0:
+            dao_upsert_dbbaroverview(symbol, exchange, interval, cnt, start_dt, end_dt)
     
     def sync_to_vnpy(self, ts_codes: Optional[List[str]] = None, 
                      full_refresh: bool = False) -> Tuple[int, int]:
@@ -816,9 +765,8 @@ class DataSyncDaemon:
         """
         # Get all ts_codes from tushare_data if not specified
         if ts_codes is None:
-            with self.tushare_engine.connect() as conn:
-                result = conn.execute(text("SELECT DISTINCT ts_code FROM stock_daily ORDER BY ts_code"))
-                ts_codes = [row[0] for row in result.fetchall()]
+            # Use existing helper to get all ts_codes
+            ts_codes = get_all_ts_codes()
         
         if not ts_codes:
             logger.warning("No symbols found in tushare_data to sync")
@@ -1020,6 +968,14 @@ Examples:
     parser.add_argument('--backfill', type=int, metavar='DAYS', help='Backfill missing trade dates for last N days')
     parser.add_argument('--retry-failed', action='store_true', help='Retry failed/partial syncs from last 7 days')
     parser.add_argument('--status', action='store_true', help='Check sync status for recent dates')
+    parser.add_argument('--dividend-range', nargs=2, metavar=('FROM','TO'), help='Ingest dividend for date range (YYYY-MM-DD YYYY-MM-DD)')
+    parser.add_argument('--top10-range', nargs=2, metavar=('FROM','TO'), help='Ingest top10_holders for date range (YYYY-MM-DD YYYY-MM-DD)')
+    parser.add_argument('--adj-range', nargs=2, metavar=('FROM','TO'), help='Ingest adj_factor for date range (YYYY-MM-DD YYYY-MM-DD)')
+    # New refactored architecture commands
+    parser.add_argument('--daily-ingest', action='store_true', help='Run daily ingest using new 7-step pipeline')
+    parser.add_argument('--backfill-missing', action='store_true', help='Backfill failed/pending steps using new status table')
+    parser.add_argument('--init-status-table', type=int, metavar='YEARS', help='Initialize data_sync_status table by scanning last N years')
+    parser.add_argument('--refresh-calendar', action='store_true', help='Refresh cached trade calendar from AkShare')
     args = parser.parse_args()
     
     daemon = DataSyncDaemon()
@@ -1031,7 +987,22 @@ Examples:
     elif args.all_symbols:
         ts_codes = None  # Will fetch all
     
-    if args.daemon:
+    # New refactored architecture commands (high priority)
+    if args.init_status_table:
+        logger.info("Initializing data_sync_status table for last %d years...", args.init_status_table)
+        initialize_sync_status_table(lookback_years=args.init_status_table)
+    elif args.refresh_calendar:
+        logger.info("Refreshing trade calendar from AkShare...")
+        refresh_trade_calendar()
+    elif args.daily_ingest:
+        logger.info("Running daily ingest with new 7-step pipeline...")
+        results = daily_ingest()
+        logger.info("Daily ingest results: %s", results)
+    elif args.backfill_missing:
+        logger.info("Running backfill for failed/pending steps...")
+        missing_data_backfill(lookback_days=60)
+    # Legacy commands
+    elif args.daemon:
         daemon.run_daemon()
     elif args.retry_failed:
         logger.info("Retrying failed/partial syncs from last 7 days...")
@@ -1050,6 +1021,21 @@ Examples:
     elif args.date:
         sync_date = datetime.strptime(args.date, '%Y-%m-%d').date()
         daemon.run_sync_for_date(sync_date)
+    elif args.dividend_range:
+        s, e = args.dividend_range
+        logger.info('Running dividend range ingest %s -> %s', s, e)
+        from app.datasync.service.tushare_ingest import ingest_dividend_by_date_range
+        ingest_dividend_by_date_range(s, e, batch_size=BATCH_SIZE)
+    elif args.top10_range:
+        s, e = args.top10_range
+        logger.info('Running top10_holders range ingest %s -> %s', s, e)
+        from app.datasync.service.tushare_ingest import ingest_top10_holders_by_date_range
+        ingest_top10_holders_by_date_range(s, e, batch_size=BATCH_SIZE)
+    elif args.adj_range:
+        s, e = args.adj_range
+        logger.info('Running adj_factor range ingest %s -> %s', s, e)
+        from app.datasync.service.tushare_ingest import ingest_adj_factor_by_date_range
+        ingest_adj_factor_by_date_range(s, e, batch_size=BATCH_SIZE)
     elif args.from_date and args.to_date:
         start = datetime.strptime(args.from_date, '%Y-%m-%d').date()
         end = datetime.strptime(args.to_date, '%Y-%m-%d').date()

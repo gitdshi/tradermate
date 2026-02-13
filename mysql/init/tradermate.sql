@@ -177,3 +177,31 @@ VALUES (
 -- -----------------------------------------------------------------------------
 CREATE INDEX idx_backtest_user_date ON backtest_history(user_id, created_at DESC);
 CREATE INDEX idx_strategies_user_active ON strategies(user_id, is_active);
+
+-- -----------------------------------------------------------------------------
+-- Data sync status table - tracks granular step-level sync status
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS data_sync_status (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    sync_date DATE NOT NULL,
+    step_name ENUM(
+        'akshare_index',           -- AkShare index daily data
+        'tushare_stock_basic',     -- Tushare stock metadata
+        'tushare_stock_daily',     -- Tushare OHLCV data
+        'tushare_adj_factor',      -- Tushare adjustment factors
+        'tushare_dividend',        -- Tushare dividend data
+        'tushare_top10_holders',   -- Tushare top10 shareholders
+        'vnpy_sync'                -- Sync to VNPy database
+    ) NOT NULL,
+    status ENUM('pending', 'running', 'success', 'partial', 'error') NOT NULL DEFAULT 'pending',
+    rows_synced INT DEFAULT 0,
+    error_message TEXT,
+    started_at TIMESTAMP NULL,
+    finished_at TIMESTAMP NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_sync_date_step (sync_date, step_name),
+    INDEX idx_status_date (status, sync_date),
+    INDEX idx_sync_date (sync_date),
+    INDEX idx_step_name (step_name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Granular data sync step tracking for daily ingest and backfill';
