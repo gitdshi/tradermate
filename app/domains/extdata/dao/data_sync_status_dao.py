@@ -282,7 +282,16 @@ def acquire_backfill_lock() -> bool:
     ensure_backfill_lock_table()
     import socket
     hostname = socket.gethostname()
-    
+    # Clear stale locks before attempting to acquire
+    try:
+        stale_hours = int(os.getenv('BACKFILL_LOCK_STALE_HOURS', '6'))
+    except Exception:
+        stale_hours = 6
+    try:
+        release_stale_backfill_lock(stale_hours)
+    except Exception:
+        logger.exception('Failed to release stale backfill lock')
+
     with engine_tm.begin() as conn:
         result = conn.execute(text("""
             UPDATE backfill_lock 
@@ -298,6 +307,47 @@ def acquire_backfill_lock() -> bool:
         else:
             logger.warning('Failed to acquire backfill lock (already locked)')
             return False
+
+
+def release_stale_backfill_lock(max_age_hours: int = 6) -> bool:
+    """Release the backfill lock if it has been held longer than `max_age_hours`.
+
+    Returns True if a stale lock was released, False otherwise.
+    """
+    ensure_backfill_lock_table()
+    with engine_tm.begin() as conn:
+        # Find locked_at timestamp
+        row = conn.execute(text("SELECT is_locked, locked_at FROM backfill_lock WHERE id = 1")).fetchone()
+        if not row:
+            return False
+        is_locked, locked_at = row[0], row[1]
+        if not is_locked or not locked_at:
+            return False
+        try:
+            from datetime import datetime, timedelta
+            now = datetime.utcnow()
+            # locked_at may be timezone-naive; compare in UTC assuming DB stores UTC
+            if isinstance(locked_at, str):
+                # Parse common format
+                try:
+                    locked_dt = datetime.fromisoformat(locked_at)
+                except Exception:
+                    return False
+            else:
+                locked_dt = locked_at
+
+            age = now - locked_dt
+            if age.total_seconds() >= max_age_hours * 3600:
+                conn.execute(text("""
+                    UPDATE backfill_lock
+                    SET is_locked = 0, locked_at = NULL, locked_by = NULL
+                    WHERE id = 1
+                """))
+                logger.info('Released stale backfill lock (age %.1f hours >= %d)', age.total_seconds()/3600.0, max_age_hours)
+                return True
+        except Exception:
+            logger.exception('Error while checking/releasing stale backfill lock')
+    return False
 
 
 def release_backfill_lock():
