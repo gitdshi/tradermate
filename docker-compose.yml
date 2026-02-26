@@ -1,0 +1,109 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: tradermate-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-tradermate}
+      MYSQL_USER: ${MYSQL_USER:-tradermate}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - tradermate-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
+  api_service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tradermate-api
+    restart: always
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      DEBUG: ${DEBUG:-False}
+      SECRET_KEY: ${JWT_SECRET_KEY}
+      DATABASE_URL: mysql+pymysql://${MYSQL_USER:-tradermate}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE:-tradermate}
+      TUSHARE_TOKEN: ${TUSHARE_TOKEN}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - tradermate-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  worker_service:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: tradermate-worker
+    restart: always
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      DEBUG: ${DEBUG:-False}
+      SECRET_KEY: ${JWT_SECRET_KEY}
+      DATABASE_URL: mysql+pymysql://${MYSQL_USER:-tradermate}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE:-tradermate}
+      TUSHARE_TOKEN: ${TUSHARE_TOKEN}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - tradermate-network
+
+  datasync_service:
+    build:
+      context: .
+      dockerfile: Dockerfile.datasync
+    container_name: tradermate-datasync
+    restart: always
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      DEBUG: ${DEBUG:-False}
+      TUSHARE_TOKEN: ${TUSHARE_TOKEN}
+      DATABASE_URL: mysql+pymysql://${MYSQL_USER:-tradermate}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE:-tradermate}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - tradermate-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: tradermate-redis
+    restart: always
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - tradermate-network
+    command: redis-server --appendonly yes
+
+volumes:
+  mysql_data:
+  redis_data:
+
+networks:
+  tradermate-network:
+    driver: bridge
