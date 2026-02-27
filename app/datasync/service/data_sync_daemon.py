@@ -114,10 +114,21 @@ logger = logging.getLogger(__name__)
 SYNC_HOUR = int(os.getenv('SYNC_HOUR', '2'))
 SYNC_MINUTE = int(os.getenv('SYNC_MINUTE', '0'))
 BACKFILL_INTERVAL_HOURS = int(os.getenv('BACKFILL_INTERVAL_HOURS', '6'))
+BACKFILL_DAYS = int(os.getenv('BACKFILL_DAYS', '30'))  # How many days to look back for missing data
 LOOKBACK_DAYS = int(os.getenv('LOOKBACK_DAYS', '60'))
 BATCH_SIZE = int(os.getenv('BATCH_SIZE', '100'))
 MAX_RETRIES = int(os.getenv('MAX_RETRIES', '3'))
 TIMEZONE = 'Asia/Shanghai'
+
+# Endpoints that must be synced (used by SyncStatusService)
+REQUIRED_ENDPOINTS = [
+    'akshare_index',
+    'tushare_stock_basic',
+    'tushare_stock_daily',
+    'tushare_adj_factor',
+    'tushare_dividend',
+    'tushare_top10_holders',
+]
 
 
 class SyncStep(str, Enum):
@@ -984,3 +995,28 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+# =============================================================================
+# DataSyncDaemon Class (added to satisfy SyncStatusService dependency)
+# =============================================================================
+
+class DataSyncDaemon:
+    """Minimal implementation to allow SyncStatusService to function.
+    
+    This is a temporary stub until full daemon class is implemented.
+    """
+
+    @staticmethod
+    def find_missing_trade_dates(lookback_days: Optional[int] = None) -> List[date]:
+        """
+        Return missing trade dates for backfill.
+        
+        TODO: Implement actual missing date detection by querying sync logs.
+        For now, return empty list (assumes no missing dates).
+        """
+        # Placeholder: in a real implementation, this would:
+        # 1. Get list of expected trade dates for lookback period
+        # 2. Compare with successfully synced dates from sync_log table
+        # 3. Return dates that are missing
+        return []

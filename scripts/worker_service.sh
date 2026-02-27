@@ -41,6 +41,13 @@ stop() {
 start() {
   stop || true
   echo "Starting worker..."
+  # Load environment variables from .env if it exists
+  if [ -f ".env" ]; then
+    set -a
+    source .env
+    set +a
+    echo "Loaded environment variables from .env"
+  fi
   # allow passing queues: ./worker_service.sh start backtest optimization
   if [ "$#" -gt 1 ]; then
     shift

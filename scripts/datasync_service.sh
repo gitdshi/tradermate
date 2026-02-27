@@ -40,6 +40,13 @@ stop() {
 start() {
   stop || true
   echo "Starting DataSync daemon..."
+  # Load environment variables from .env if it exists
+  if [ -f ".env" ]; then
+    set -a
+    source .env
+    set +a
+    echo "Loaded environment variables from .env"
+  fi
   nohup "$VENV_PY" -u -m app.datasync.service.data_sync_daemon --daemon >>"$OUT_FILE" 2>&1 &
   echo $! > "$PID_FILE"
   sleep 1

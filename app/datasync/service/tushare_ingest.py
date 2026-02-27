@@ -9,7 +9,10 @@ import numpy as np
 logging.basicConfig(level=logging.INFO)
 
 # Tushare data is stored in the tushare database
-TUSHARE_DB_URL = os.getenv('TUSHARE_DATABASE_URL', 'mysql+pymysql://root:password@127.0.0.1/tushare?charset=utf8mb4')
+# Must be provided via TUSHARE_DATABASE_URL environment variable
+TUSHARE_DB_URL = os.getenv('TUSHARE_DATABASE_URL')
+if not TUSHARE_DB_URL:
+    raise ValueError("TUSHARE_DATABASE_URL must be set")
 TS_TOKEN = os.getenv('TUSHARE_TOKEN', '')
 
 # Use engine from tushare DAO

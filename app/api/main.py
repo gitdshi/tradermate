@@ -2,6 +2,7 @@
 import sys
 from pathlib import Path
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 # Ensure project root is importable
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,7 +31,7 @@ async def lifespan(app: FastAPI):
     """Application lifespan events."""
     # Startup
     logger.info("Starting TraderMate API...")
-    logger.info("Database migrations should be applied during provisioning; skipping runtime init")
+    logger.info("Database migrations should be applied during runtime init")
     
     yield
     
@@ -79,8 +80,45 @@ async def root():
 
 @app.get("/health")
 async def health():
-    """Health check endpoint."""
-    return {"status": "healthy"}
+    """Health check endpoint with database and Redis connectivity checks."""
+    from sqlalchemy import text
+    import redis
+    
+    health_status = {
+        "status": "healthy",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "service": "tradermate",
+        "dependencies": {}
+    }
+    
+    # Check MySQL connection
+    try:
+        from app.infrastructure.db.connections import get_tradermate_engine
+        engine = get_tradermate_engine()
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        health_status["dependencies"]["mysql"] = {"status": "healthy"}
+    except Exception as e:
+        health_status["status"] = "unhealthy"
+        health_status["dependencies"]["mysql"] = {"status": "unhealthy", "error": str(e)}
+        logger.error(f"MySQL health check failed: {e}")
+    
+    # Check Redis connection
+    try:
+        r = redis.Redis.from_url(settings.redis_url)
+        r.ping()
+        health_status["dependencies"]["redis"] = {"status": "healthy"}
+    except Exception as e:
+        health_status["status"] = "unhealthy"
+        health_status["dependencies"]["redis"] = {"status": "unhealthy", "error": str(e)}
+        logger.error(f"Redis health check failed: {e}")
+    
+    # Return 503 if unhealthy
+    from fastapi.responses import JSONResponse
+    if health_status["status"] != "healthy":
+        return JSONResponse(status_code=503, content=health_status)
+    
+    return health_status
 
 
 @app.get("/api")

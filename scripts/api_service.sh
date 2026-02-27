@@ -39,6 +39,13 @@ stop() {
 start() {
   stop || true
   echo "Starting API..."
+  # Load environment variables from .env if it exists
+  if [ -f ".env" ]; then
+    set -a
+    source .env
+    set +a
+    echo "Loaded environment variables from .env"
+  fi
   nohup "$VENV_PY" -m uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --reload >>"$OUT_FILE" 2>&1 &
   echo $! > "$PID_FILE"
   sleep 1

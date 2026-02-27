@@ -31,7 +31,9 @@ try:
     vnsetting.SETTINGS['database.host'] = os.getenv('VN_DATABASE_HOST', os.getenv('MYSQL_HOST', '127.0.0.1'))
     vnsetting.SETTINGS['database.port'] = int(os.getenv('VN_DATABASE_PORT', os.getenv('MYSQL_PORT', '3306')))
     vnsetting.SETTINGS['database.user'] = os.getenv('VN_DATABASE_USER', os.getenv('MYSQL_USER', 'root'))
-    vnsetting.SETTINGS['database.password'] = os.getenv('VN_DATABASE_PASSWORD', os.getenv('MYSQL_PASSWORD', 'password'))
+    vnsetting.SETTINGS['database.password'] = os.getenv('VN_DATABASE_PASSWORD') or os.getenv('MYSQL_PASSWORD')
+    if not vnsetting.SETTINGS['database.password']:
+        raise ValueError("Database password must be set via VN_DATABASE_PASSWORD or MYSQL_PASSWORD")
     vnsetting.SETTINGS['database.database'] = os.getenv('VN_DATABASE_DB', os.getenv('MYSQL_DATABASE', 'vnpy'))
 except Exception:
     pass

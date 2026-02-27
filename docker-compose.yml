@@ -10,8 +10,10 @@ services:
     container_name: tradermate_api
     restart: unless-stopped
     depends_on:
-      - mysql
-      - redis
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       # App Settings
       - APP_NAME=TraderMate
@@ -21,14 +23,14 @@ services:
       - MYSQL_HOST=mysql
       - MYSQL_PORT=3306
       - MYSQL_USER=root
-      - MYSQL_PASSWORD=password
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
       - TUSHARE_DATABASE=tushare
       - VNPY_DATABASE=vnpy
       # Redis Settings
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       # JWT Settings
-      - JWT_SECRET_KEY=your-super-secret-key-change-in-production
+      - JWT_SECRET_KEY=${SECRET_KEY}
       - JWT_ALGORITHM=HS256
       - ACCESS_TOKEN_EXPIRE_MINUTES=30
       - REFRESH_TOKEN_EXPIRE_DAYS=7
@@ -41,6 +43,12 @@ services:
       - ./logs:/app/logs
     networks:
       - tradermate_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
   # Background Worker Service
   worker:
@@ -57,7 +65,7 @@ services:
       - MYSQL_HOST=mysql
       - MYSQL_PORT=3306
       - MYSQL_USER=root
-      - MYSQL_PASSWORD=password
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
       - TUSHARE_DATABASE=tushare
       - VNPY_DATABASE=vnpy
       - REDIS_HOST=redis
@@ -81,7 +89,7 @@ services:
       - MYSQL_HOST=mysql
       - MYSQL_PORT=3306
       - MYSQL_USER=root
-      - MYSQL_PASSWORD=password
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
       - TUSHARE_DATABASE_URL=mysql+pymysql://root:password@mysql:3306/tushare?charset=utf8mb4
       - VNPY_DATABASE_URL=mysql+pymysql://root:password@mysql:3306/vnpy?charset=utf8mb4
     networks:
@@ -101,6 +109,12 @@ services:
       - ./mysql/init:/docker-entrypoint-initdb.d
     networks:
       - tradermate_network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-ppassword"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   # Redis (for job queue)
   redis:
@@ -113,6 +127,11 @@ services:
       - redis_data:/data
     networks:
       - tradermate_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # Frontend (tradermate-portal)
   portal:

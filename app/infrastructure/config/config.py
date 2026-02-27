@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     app_version: str = "1.0.0"
     debug: bool = False
 
-    secret_key: str = "tradermate-secret-key-change-in-production"
+    secret_key: str  # JWT 密钥，必须从环境变量 SECRET_KEY 读取
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 60 * 24
     refresh_token_expire_days: int = 7
@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     mysql_host: str = "127.0.0.1"
     mysql_port: int = 3306
     mysql_user: str = "root"
-    mysql_password: str = "password"
+    mysql_password: str  # 必须从环境变量 MYSQL_PASSWORD 读取
     tushare_db: str = "tushare"
     tradermate_db: str = "tradermate"
 
