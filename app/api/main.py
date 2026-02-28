@@ -22,6 +22,9 @@ from app.infrastructure.config import get_settings
 from app.api.routes import auth, strategies, data, backtest, queue
 from app.api.routes import system
 from app.api.routes import strategy_code
+from app.domains.auth.dao.user_dao import UserDao
+from app.api.services.auth_service import get_password_hash
+import os
 
 settings = get_settings()
 
@@ -32,6 +35,29 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting TraderMate API...")
     logger.info("Database migrations should be applied during runtime init")
+    
+    # Create default admin user if configured (Issue #17)
+    default_username = os.getenv("DEFAULT_ADMIN_USERNAME")
+    default_password = os.getenv("DEFAULT_ADMIN_PASSWORD")
+    if default_username and default_password:
+        try:
+            user_dao = UserDao()
+            if not user_dao.username_exists(default_username):
+                hashed_pw = get_password_hash(default_password)
+                now = datetime.now(timezone.utc)
+                user_dao.insert_user(
+                    username=default_username,
+                    email=f"{default_username}@tradermate.local",
+                    hashed_password=hashed_pw,
+                    created_at=now
+                )
+                logger.info(f"Created default admin user '{default_username}'")
+            else:
+                logger.info(f"Default admin user '{default_username}' already exists, skipping creation")
+        except Exception as e:
+            logger.error(f"Failed to create default admin user: {e}", exc_info=True)
+    else:
+        logger.warning("DEFAULT_ADMIN_USERNAME or DEFAULT_ADMIN_PASSWORD not set - skipping default admin user creation")
     
     yield
     
