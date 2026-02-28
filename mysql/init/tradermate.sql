@@ -160,17 +160,20 @@ CREATE TABLE IF NOT EXISTS strategy_history (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='History snapshots for DB strategy code';
 
 -- -----------------------------------------------------------------------------
--- Insert default test user (password: admin123)
--- Password hash generated with bcrypt for 'admin123'
+-- NOTE: Default admin user is now created by the application at startup
+-- using environment variables DEFAULT_ADMIN_USERNAME and DEFAULT_ADMIN_PASSWORD.
+-- This ensures production deployments use secure, unique credentials.
+--
+-- If you need to create a default admin user manually (e.g., for local dev),
+-- use the following SQL after the database is initialized:
+--
+-- INSERT INTO users (username, email, hashed_password, is_active, created_at)
+-- VALUES ('admin', 'admin@tradermate.local', '<bcrypt-hash>', TRUE, NOW())
+-- ON DUPLICATE KEY UPDATE username=username;
+--
+-- To generate a bcrypt hash, use Python:
+--   python -c "from passlib.context import CryptContext; pwd = CryptContext(schemes=['bcrypt']); print(pwd.hash('your-password'))"
 -- -----------------------------------------------------------------------------
-INSERT INTO users (username, email, hashed_password, is_active, created_at) 
-VALUES (
-    'admin', 
-    'admin@tradermate.local', 
-    '$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewY5GyYqVvmvhxKe',
-    TRUE,
-    NOW()
-) ON DUPLICATE KEY UPDATE username=username;
 
 -- -----------------------------------------------------------------------------
 -- Create indexes for query optimization
