@@ -857,15 +857,15 @@ def initialize_sync_status_table(lookback_years: int = 15):
     rows_to_insert = []
     for td in trade_days:
         daily_count = stock_daily_counts.get(td, 0)
-        status_daily = SyncStatus.SUCCESS if daily_count > 5000 else SyncStatus.PENDING
+        status_daily = SyncStatus.SUCCESS if daily_count > 0 else SyncStatus.PENDING
         rows_to_insert.append((td, SyncStep.TUSHARE_STOCK_DAILY.value, status_daily.value, daily_count, None, None, None))
 
         adj_count = adj_factor_counts.get(td, 0)
-        status_adj = SyncStatus.SUCCESS if adj_count > 5000 else SyncStatus.PENDING
+        status_adj = SyncStatus.SUCCESS if adj_count > 0 else SyncStatus.PENDING
         rows_to_insert.append((td, SyncStep.TUSHARE_ADJ_FACTOR.value, status_adj.value, adj_count, None, None, None))
 
         vnpy_count = vnpy_counts.get(td, 0)
-        status_vnpy = SyncStatus.SUCCESS if vnpy_count > 1000 else SyncStatus.PENDING
+        status_vnpy = SyncStatus.SUCCESS if vnpy_count > 0 else SyncStatus.PENDING
         rows_to_insert.append((td, SyncStep.VNPY_SYNC.value, status_vnpy.value, vnpy_count, None, None, None))
 
         for step in (SyncStep.AKSHARE_INDEX, SyncStep.TUSHARE_DIVIDEND, SyncStep.TUSHARE_TOP10_HOLDERS):
@@ -975,18 +975,20 @@ def main():
     parser.add_argument('--daily', action='store_true', help='Run daily ingest once')
     parser.add_argument('--backfill', action='store_true', help='Run backfill once')
     parser.add_argument('--init', action='store_true', help='Initialize sync status table')
+    parser.add_argument('--lookback-days', type=int, default=LOOKBACK_DAYS, help='Backfill lookback days (used with --backfill)')
+    parser.add_argument('--lookback-years', type=int, default=15, help='Init lookback years (used with --init)')
     parser.add_argument('--refresh-calendar', action='store_true', help='Refresh trade calendar')
     
     args = parser.parse_args()
     
     if args.init:
-        initialize_sync_status_table()
+        initialize_sync_status_table(lookback_years=args.lookback_years)
     elif args.refresh_calendar:
         refresh_trade_calendar()
     elif args.daily:
         daily_ingest()
     elif args.backfill:
-        missing_data_backfill()
+        missing_data_backfill(lookback_days=args.lookback_days)
     elif args.daemon:
         run_daemon()
     else:

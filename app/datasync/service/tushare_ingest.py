@@ -398,8 +398,8 @@ def ingest_stock_basic(exchange=None, list_status='L'):
             logging.info('Ingested stock_basic rows: 0')
             return
         # df is present and not empty; delegate to DAO
-            from app.domains.extdata.dao.tushare_dao import upsert_stock_basic
-            rows = upsert_stock_basic(df)
+        from app.domains.extdata.dao.tushare_dao import upsert_stock_basic
+        rows = upsert_stock_basic(df)
         audit_finish(aid, 'success', rows)
         logging.info('Ingested stock_basic rows: %d', rows)
     except Exception as e:
