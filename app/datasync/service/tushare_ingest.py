@@ -624,23 +624,90 @@ def ingest_all_daily(batch_size:int=None, sleep_between:float=0.2):
         for ts_code in chunk:
             # determine resume point
             last_date = get_max_trade_date(ts_code)
-            start_date = None
+            # If we have a last_date in DB, fetch only missing days (existing behavior)
             if last_date:
                 try:
                     start_date = (pd.to_datetime(last_date) + pd.Timedelta(days=1)).strftime('%Y%m%d')
                 except Exception:
                     start_date = None
+                attempt = 0
+                while attempt < max_retries:
+                    try:
+                        logging.info('Ingesting daily for %s (start_date=%s)', ts_code, start_date)
+                        ingest_daily(ts_code=ts_code, start_date=start_date, end_date=None)
+                        break
+                    except Exception as e:
+                        attempt += 1
+                        logging.warning('Attempt %d failed for %s: %s', attempt, ts_code, e)
+                        time.sleep(1 + attempt)
+            else:
+                # No data in DB for this ts_code: fetch full history once, then filter out any rows
+                # that already exist (defensive) and bulk upsert missing rows. This is much faster
+                # than iterating per-date across all symbols.
+                attempt = 0
+                while attempt < max_retries:
+                    try:
+                        logging.info('Fetching full history for %s', ts_code)
+                        df = call_pro('daily', ts_code=ts_code)
+                        if df is None or df.empty:
+                            logging.info('No daily data returned for %s', ts_code)
+                            break
 
-            attempt = 0
-            while attempt < max_retries:
-                try:
-                    logging.info('Ingesting daily for %s (start_date=%s)', ts_code, start_date)
-                    ingest_daily(ts_code=ts_code, start_date=start_date, end_date=None)
-                    break
-                except Exception as e:
-                    attempt += 1
-                    logging.warning('Attempt %d failed for %s: %s', attempt, ts_code, e)
-                    time.sleep(1 + attempt)
+                        # normalize trade_date once for all rows
+                        try:
+                            df['trade_date'] = pd.to_datetime(df.get('trade_date'), errors='coerce').dt.date
+                        except Exception:
+                            logging.exception('Failed to normalize trade_date for %s', ts_code)
+
+                        # determine date window and fetch existing keys to avoid duplicates
+                        try:
+                            dates = df['trade_date'].dropna()
+                            if dates.empty:
+                                logging.info('No valid trade_date rows for %s', ts_code)
+                                break
+                            s_norm = dates.min().isoformat()
+                            e_norm = dates.max().isoformat()
+                        except Exception:
+                            s_norm = None
+                            e_norm = None
+
+                        existing = set()
+                        if s_norm and e_norm:
+                            existing = _fetch_existing_keys('stock_daily', 'trade_date', s_norm, e_norm)
+
+                        # filter out rows already present
+                        def _row_key(r):
+                            td = r.get('trade_date')
+                            if td is None:
+                                return None
+                            try:
+                                dstr = td.isoformat() if hasattr(td, 'isoformat') else str(td)
+                            except Exception:
+                                dstr = str(td)
+                            return (r.get('ts_code'), dstr)
+
+                        records = []
+                        for r in df.to_dict(orient='records'):
+                            key = _row_key(r)
+                            if key is None:
+                                continue
+                            if key in existing:
+                                continue
+                            records.append(r)
+
+                        if not records:
+                            logging.info('No new daily rows to insert for %s', ts_code)
+                            break
+
+                        # Build a DataFrame of only new records and delegate to DAO upsert
+                        df_new = pd.DataFrame(records)
+                        rows = upsert_daily(df_new)
+                        logging.info('Inserted %d new daily rows for %s', rows, ts_code)
+                        break
+                    except Exception as e:
+                        attempt += 1
+                        logging.warning('Attempt %d failed fetching full history for %s: %s', attempt, ts_code, e)
+                        time.sleep(1 + attempt)
             time.sleep(sleep_between)
 
     logging.info('Bulk daily ingest completed')
