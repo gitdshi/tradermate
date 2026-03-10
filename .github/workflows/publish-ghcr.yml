@@ -1,0 +1,44 @@
+name: Publish API Image (GHCR)
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "Dockerfile.api"
+      - "requirements.txt"
+      - "app/**"
+      - ".github/workflows/publish-ghcr.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.api
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/tradermate-api:latest
+            ghcr.io/${{ github.repository_owner }}/tradermate-api:sha-${{ github.sha }}

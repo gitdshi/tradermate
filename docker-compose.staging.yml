@@ -6,6 +6,7 @@ version: '3.8'
 services:
   # TraderMate API Service (Staging 配置)
   api:
+    image: ghcr.io/${GITHUB_OWNER:-gitdshi}/tradermate-api:${IMAGE_TAG:-latest}
     depends_on:
       redis:
         condition: service_healthy
@@ -40,9 +41,6 @@ services:
       - CORS_ORIGINS=["http://localhost:5173","http://localhost:3000","http://127.0.0.1:5173"]
     ports:
       - "8000:8000"  # Staging 暴露端口便于测试
-    volumes:
-      - ./app:/app/app:ro
-      - ./logs:/app/logs:ro
     networks:
       - tradermate_network
     healthcheck:
@@ -54,6 +52,7 @@ services:
 
   # Background Worker Service
   worker:
+    image: ghcr.io/${GITHUB_OWNER:-gitdshi}/tradermate-api:${IMAGE_TAG:-latest}
     depends_on:
       redis:
         condition: service_healthy
@@ -68,9 +67,6 @@ services:
       - REDIS_PORT=6379
       - DEBUG=false
     command: ["rq", "worker", "--url", "redis://redis:6379", "backtest", "optimization"]
-    volumes:
-      - ./app:/app/app:ro
-      - ./logs:/app/logs:ro
     networks:
       - tradermate_network
     deploy:
@@ -99,11 +95,9 @@ services:
       timeout: 5s
       retries: 5
 
-  # Frontend (使用开发构建，Staging 不需要生产镜像)
+  # Frontend
   portal:
-    build:
-      context: ../tradermate-portal
-      dockerfile: Dockerfile
+    image: ghcr.io/${GITHUB_OWNER:-gitdshi}/tradermate-portal:${IMAGE_TAG:-latest}
     container_name: tradermate_portal
     restart: unless-stopped
     ports:
