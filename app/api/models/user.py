@@ -7,11 +7,13 @@ from pydantic import BaseModel, EmailStr, Field
 class UserBase(BaseModel):
     """Base user model."""
     username: str = Field(..., min_length=3, max_length=50)
-    email: Optional[EmailStr] = None
+    # Keep responses lenient to avoid failing on reserved/local domains.
+    email: Optional[str] = None
 
 
 class UserCreate(UserBase):
     """User creation model."""
+    email: Optional[EmailStr] = None
     password: str = Field(..., min_length=6, max_length=100)
 
 
